@@ -1,0 +1,7 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="com.weike.ime.MainActivity">
+    <subtype
+        android:imeSubtypeLocale="zh_CN"
+        android:imeSubtypeMode="keyboard"
+        android:label="维刻输入法" />
+</input-method>

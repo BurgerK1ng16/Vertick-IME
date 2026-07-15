@@ -1,0 +1,8 @@
+<resources>
+    <color name="weike_background">#252526</color>
+    <color name="weike_panel">#303032</color>
+    <color name="weike_key">#515154</color>
+    <color name="weike_text">#F7F7F5</color>
+    <color name="weike_muted">#BDBDBF</color>
+    <color name="weike_accent">#1BB39A</color>
+</resources>

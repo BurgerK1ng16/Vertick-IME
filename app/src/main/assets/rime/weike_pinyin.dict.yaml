@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+---
+name: weike_pinyin
+version: '2026.07'
+sort: by_weight
+import_tables:
+  # Keep the complete Rime-Ice tables direct. Some Android librime builds do
+  # not reliably expand a second-level import during deployment.
+  - cn_dicts/8105
+  - cn_dicts/base
+  - cn_dicts/ext
+  - cn_dicts/tencent
+  - cn_dicts/others
+  - weike_terms
+...

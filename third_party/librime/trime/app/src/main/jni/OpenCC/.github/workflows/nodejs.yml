@@ -1,0 +1,43 @@
+name: Node.js
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        # Bleeding Edge: Latest Node × Latest OS
+        os: [ubuntu-latest, macos-latest]
+        node-version: [latest]
+        # Stable: Node 20, 22 (LTS) on macOS 14 (ARM64)
+        include:
+          - os: macos-14
+            node-version: 22
+          - os: macos-14
+            node-version: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci
+      - run: npm test
+      - name: upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencc-nodejs-${{ matrix.os }}-node-${{ matrix.node-version }}
+          path: |
+            node/build/**
+            **/npm-debug.log

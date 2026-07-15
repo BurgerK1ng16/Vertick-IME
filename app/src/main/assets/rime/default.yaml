@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+config_version: '2026.07'
+
+schema_list:
+  - schema: weike_pinyin
+
+menu:
+  page_size: 9

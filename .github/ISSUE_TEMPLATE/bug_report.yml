@@ -1,0 +1,19 @@
+name: Bug report
+description: Report a reproducible issue without including private text, audio, or credentials.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: Reproduction steps
+      description: Do not include API keys, clipboard contents, or private dictation.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Device and Android version
