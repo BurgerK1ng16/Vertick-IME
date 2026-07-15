@@ -1,4 +1,4 @@
-# 维刻（Vertick）输入法
+# 维刻输入法（Vertick IME）
 
 [English](README_EN.md) | [下载正式版](https://github.com/BurgerK1ng16/Vertick-IME/releases)
 
