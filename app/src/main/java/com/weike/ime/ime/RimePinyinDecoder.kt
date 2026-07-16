@@ -2,6 +2,7 @@ package com.weike.ime.ime
 
 import android.content.Context
 import com.osfans.trime.core.Rime
+import com.weike.ime.data.ChineseKeyboardLayout
 import com.weike.ime.data.LexiconTerm
 import com.weike.ime.data.TypingDictionaryEntry
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +82,14 @@ class RimePinyinDecoder(context: Context) {
 
     suspend fun currentState(): PinyinSessionState = nativeState {
         if (!isReady) PinyinSessionState() else snapshot()
+    }
+
+    suspend fun selectChineseKeyboardLayout(layout: ChineseKeyboardLayout): Boolean = nativeState {
+        if (!isReady) return@nativeState false
+        val schema = if (layout == ChineseKeyboardLayout.NINE_KEY) T9_SCHEMA_ID else SCHEMA_ID
+        Rime.selectRimeSchema(schema).also { selected ->
+            if (selected) Rime.clearRimeComposition()
+        }
     }
 
     /** Uses the same reading lookup as the generated Rime custom dictionary. */
@@ -268,9 +277,10 @@ class RimePinyinDecoder(context: Context) {
 
     companion object {
         const val SCHEMA_ID = "weike_pinyin"
+        const val T9_SCHEMA_ID = "weike_t9"
         const val DICTIONARY_VERSION = "Rime-Ice Full Chinese 2026.07.07"
         const val ENGINE_VERSION_TEXT = "librime 1.17.0"
-        private const val ENGINE_VERSION = "weike-rime-ice-full-2026.07.14.2"
+        private const val ENGINE_VERSION = "weike-rime-ice-full-2026.07.16.3"
         private const val TERMS_FILE = "weike_terms.dict.yaml"
         private const val TERMS_PENDING_FILE = ".weike_terms_pending"
         private const val KEY_BACKSPACE = 0xff08
@@ -281,6 +291,7 @@ class RimePinyinDecoder(context: Context) {
         private val ASSET_FILES = listOf(
             "default.yaml",
             "weike_pinyin.schema.yaml",
+            "weike_t9.schema.yaml",
             "weike_pinyin.dict.yaml",
             "weike_terms.dict.yaml",
             "rime_ice.dict.yaml",

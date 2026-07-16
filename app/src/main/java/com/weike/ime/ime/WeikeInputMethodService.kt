@@ -15,6 +15,7 @@ import android.util.Log
 import android.widget.Toast
 import com.weike.ime.data.AppContainer
 import com.weike.ime.data.AppSettingsRepository
+import com.weike.ime.data.ChineseKeyboardLayout
 import com.weike.ime.data.ClipboardEntry
 import com.weike.ime.data.CloudApiSettings
 import com.weike.ime.data.HapticStrength
@@ -71,6 +72,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var keyboardTheme = KeyboardTheme.DARK
     private var keyboardThemePreference = KeyboardTheme.DARK
     private var expressionOptimization = false
+    private var chineseKeyboardLayout = ChineseKeyboardLayout.FULL
     private var pinyinBuffer = ""
     private var pinyinCandidates: List<PinyinCandidate> = emptyList()
     private val pinyinMutex = Mutex()
@@ -154,6 +156,16 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 if (!isConfiguredMode(mode) && mode != KeyboardMode.SYMBOLS) {
                     if (voiceState != VoiceUiState.Idle || activeVoiceMode != null) cancelActiveVoiceSession()
                     mode = initialModeFor(visibleKeyboardModes.first())
+                }
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.chineseKeyboardLayout.collect { layout ->
+                chineseKeyboardLayout = layout
+                if (pinyinReady) enqueuePinyin {
+                    pinyinDecoder.selectChineseKeyboardLayout(layout)
+                    applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
                 }
                 render()
             }
@@ -329,6 +341,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 }
                     .onFailure { Log.e(TAG, "Unable to prepare Rime", it) }
                     .getOrDefault(false)
+                if (pinyinReady) pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
                 if (pinyinReady && RimePinyinDecoder.consumeClearRequest(this@WeikeInputMethodService)) {
                     pinyinReady = pinyinDecoder.clearUserLearning()
                 }
@@ -503,6 +516,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 render()
                 return@launch
             }
+            val activePunctuation = if (askMode) punctuation else container.settings.punctuationPreference()
+            if (!askMode && !polishMode && streamDirectDictation(pcm, sessionId, sessionMode, recordingDurationMs, activePunctuation)) {
+                return@launch
+            }
             val transcription = withTimeoutOrNull(ASR_TIMEOUT_MS) {
                 ensureVoiceSession(sessionId, sessionMode)
                 asrClient.transcribe(pcm)
@@ -521,7 +538,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 return@launch
             }
             rawTranscript = source
-            val activePunctuation = if (askMode) punctuation else container.settings.punctuationPreference()
             if (!askMode && !polishMode) {
                 commitResult(
                     applyPunctuationPreference(source, activePunctuation),
@@ -674,6 +690,52 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         toastFor("识别超时，请重试", 1_500L)
         voiceState = VoiceUiState.Idle
         render()
+    }
+
+    /** Inserts ASR deltas as they arrive and falls back to the non-streaming request if none arrive. */
+    private suspend fun streamDirectDictation(
+        pcm: ByteArray,
+        sessionId: Long,
+        sessionMode: KeyboardMode,
+        recordingDurationMs: Long,
+        punctuation: PunctuationPreference
+    ): Boolean {
+        val connection = currentInputConnection ?: return false
+        val raw = StringBuilder()
+        var receivedDelta = false
+        val completed = runCatching {
+            withTimeoutOrNull(ASR_TIMEOUT_MS) {
+                asrClient.transcribeStream(pcm).collect { delta ->
+                    ensureVoiceSession(sessionId, sessionMode)
+                    if (delta.isBlank()) return@collect
+                    connection.commitText(delta, 1)
+                    raw.append(delta)
+                    receivedDelta = true
+                    rawTranscript = raw.toString()
+                }
+                true
+            } ?: false
+        }.getOrElse { error ->
+            Log.w(TAG, "Streaming ASR unavailable; using standard request", error)
+            false
+        }
+        if (!receivedDelta) return false
+
+        val finalText = applyPunctuationPreference(raw.toString(), punctuation)
+        if (finalText != raw.toString()) {
+            connection.deleteSurroundingText(raw.length, 0)
+            connection.commitText(finalText, 1)
+        }
+        rawTranscript = finalText
+        lastCommittedText = finalText
+        lastCommitConnection = connection
+        persistDictation(InputHistoryType.DICTATION, finalText, recordingDurationMs)
+        if (isCurrentVoiceSession(sessionId, sessionMode)) {
+            activeVoiceMode = null
+            voiceState = VoiceUiState.Idle
+            render()
+        }
+        return completed || receivedDelta
     }
 
     private fun commitResult(
@@ -955,7 +1017,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 mode, voiceState, style, pinyinBuffer, pinyinCandidates,
                 englishBuffer, englishCandidates, rawTranscript, sensitiveField, hapticStrength,
                 pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
-                clipboardEntries
+                clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
+                modeBeforeSymbols == KeyboardMode.ENGLISH
             )
         }
     }
@@ -1050,8 +1113,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                     .split(' ')
                     .filter(String::isNotBlank)
                 if (codeParts.isEmpty()) return@mapNotNull null
-                val fullCode = codeParts.joinToString("")
-                val initials = codeParts.joinToString("") { it.take(1) }
+                val fullCode = pinyinInputCode(codeParts.joinToString(""))
+                val initials = pinyinInputCode(codeParts.joinToString("") { it.take(1) })
                 val fullMatch = query == fullCode
                 val initialsMatch = query.length >= 3 && initials.startsWith(query)
                 if (fullMatch || initialsMatch) PinyinCandidate(
@@ -1065,6 +1128,23 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             .toList()
         if (custom.isEmpty()) return nativeCandidates
         return custom + nativeCandidates.filterNot { native -> custom.any { it.text == native.text } }
+    }
+
+    private fun pinyinInputCode(value: String): String {
+        if (chineseKeyboardLayout != ChineseKeyboardLayout.NINE_KEY) return value
+        return value.map { character ->
+            when (character) {
+                in 'a'..'c' -> '2'
+                in 'd'..'f' -> '3'
+                in 'g'..'i' -> '4'
+                in 'j'..'l' -> '5'
+                in 'm'..'o' -> '6'
+                in 'p'..'s' -> '7'
+                in 't'..'v' -> '8'
+                in 'w'..'z' -> '9'
+                else -> character
+            }
+        }.joinToString("")
     }
 
     private fun enqueuePinyin(block: suspend () -> Unit) {

@@ -39,6 +39,7 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.weike.ime.data.AppContainer
+import com.weike.ime.data.ChineseKeyboardLayout
 import com.weike.ime.data.HapticStrength
 import com.weike.ime.data.HistoryRetention
 import com.weike.ime.data.InputHistory
@@ -695,6 +696,21 @@ class MainActivity : AppCompatActivity() {
         keyboardModesList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
         addView(keyboardModesList)
         renderKeyboardModeControls(latestKeyboardModes)
+        addView(card().apply {
+            val layouts = ChineseKeyboardLayout.entries.toList()
+            val layoutControl = SegmentedControl(this@MainActivity, layouts.map { it.displayName }, 0) { index ->
+                lifecycleScope.launch { container.settings.saveChineseKeyboardLayout(layouts[index]) }
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "中文主键盘"
+                textSize = 18f
+                setTextColor(getColor(R.color.weike_text))
+            })
+            addView(layoutControl)
+            lifecycleScope.launch {
+                layoutControl.setSelected(layouts.indexOf(container.settings.chineseKeyboardLayout()).coerceAtLeast(0))
+            }
+        })
         addView(section("剪贴板"))
         addView(card().apply {
             val clipboardControl = SegmentedControl(this@MainActivity, listOf("关闭", "开启"), 0) { index ->

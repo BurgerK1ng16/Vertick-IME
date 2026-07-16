@@ -74,6 +74,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var clipboardEntries: List<ClipboardEntry> = emptyList()
     private var pinyinReady = true
     private var pinyinStatus = ""
+    private var pinyinNineKey = false
+    private var symbolsUseEnglish = false
     private var candidateScrollX = 0f
     private var candidateMaxScroll = 0f
     private var candidateDragging = false
@@ -109,6 +111,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var pressedBox: RectF? = null
     private var activeTarget: TouchTarget? = null
     private var activeTargetCancelled = false
+    private val secondaryTouches = mutableMapOf<Int, TouchTarget>()
+    private val cancelledSecondaryTouches = mutableSetOf<Int>()
     private var longPressTriggered = false
     private var repeatAction: (() -> Unit)? = null
     private val longPressRunnable = Runnable {
@@ -187,7 +191,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         keyboardTheme: KeyboardTheme = this.keyboardTheme,
         keyboardSoundVolume: Float = this.keyboardSoundVolume,
         modeOptions: List<KeyboardMode> = this.availableModes,
-        clipboardEntries: List<ClipboardEntry> = this.clipboardEntries
+        clipboardEntries: List<ClipboardEntry> = this.clipboardEntries,
+        pinyinNineKey: Boolean = this.pinyinNineKey,
+        symbolsUseEnglish: Boolean = this.symbolsUseEnglish
     ) {
         val normalizedModes = modeOptions.distinct().filter { it != KeyboardMode.SYMBOLS }
             .ifEmpty { listOf(KeyboardMode.PINYIN) }
@@ -235,6 +241,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.clipboardEntries = clipboardEntries
         this.pinyinReady = pinyinReady
         this.pinyinStatus = pinyinStatus
+        this.pinyinNineKey = pinyinNineKey
+        this.symbolsUseEnglish = symbolsUseEnglish
         this.keyboardTheme = keyboardTheme
         this.sensitive = sensitive
         this.hapticStrength = hapticStrength
@@ -635,6 +643,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun drawKeyboard(canvas: Canvas, pinyin: Boolean) {
+        if (pinyin && pinyinNineKey) {
+            drawNineKeyKeyboard(canvas)
+            return
+        }
         val top = dp(62)
         val gap = dp(8)
         val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
@@ -645,6 +657,53 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         letters(canvas, "asdfghjkl", top + keyHeight + gap, keyHeight, pinyin, (width - secondWidth) / 2f, letterWidth)
         thirdRow(canvas, top + (keyHeight + gap) * 2, keyHeight, pinyin, letterWidth)
         bottomRow(canvas, top + (keyHeight + gap) * 3, keyHeight, pinyin, letterWidth)
+    }
+
+    private fun drawNineKeyKeyboard(canvas: Canvas) {
+        val top = dp(62)
+        val gap = dp(7)
+        val edge = dp(5)
+        val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
+        val keyWidth = (width - edge * 2 - gap * 2) / 3f
+        val rows = listOf(
+            listOf("ABC" to "2", "DEF" to "3", "GHI" to "4"),
+            listOf("JKL" to "5", "MNO" to "6", "PQRS" to "7"),
+            listOf("TUV" to "8", "WXYZ" to "9")
+        )
+        rows.forEachIndexed { rowIndex, row ->
+            val y = top + (keyHeight + gap) * rowIndex
+            row.forEachIndexed { column, (letters, code) ->
+                val x = edge + column * (keyWidth + gap)
+                val box = RectF(x, y, x + keyWidth, y + keyHeight)
+                key(canvas, box)
+                label(canvas, letters, box.centerX(), box.centerY() - dp(3), 17f, white, Paint.Align.CENTER, true)
+                label(canvas, code, box.centerX(), box.centerY() + dp(17), 12f, muted, Paint.Align.CENTER)
+                target(box, keySound = true) { actions.typePinyin(code) }
+            }
+            if (rowIndex == 2) {
+                val x = edge + 2 * (keyWidth + gap)
+                val back = RectF(x, y, x + keyWidth, y + keyHeight)
+                key(canvas, back)
+                lucide(canvas, R.drawable.ic_lucide_delete, back.centerX(), back.centerY(), dp(23), white)
+                target(back, repeat = true, keySound = true) { actions.backspace() }
+            }
+        }
+        val y = top + (keyHeight + gap) * 3
+        val controlWidth = keyWidth * .82f
+        val symbols = RectF(edge, y, edge + controlWidth, y + keyHeight)
+        val enter = RectF(width - edge - controlWidth, y, width - edge, y + keyHeight)
+        val space = RectF(symbols.right + gap, y, enter.left - gap, y + keyHeight)
+        key(canvas, symbols)
+        key(canvas, space)
+        rounded(canvas, enter, dp(10), white)
+        centeredLabel(canvas, "123", symbols, 16f, white, Paint.Align.CENTER)
+        label(canvas, "拼", space.right - dp(11), space.centerY() + dp(10), 14f, muted, Paint.Align.RIGHT, true)
+        lucide(canvas, R.drawable.ic_lucide_move_right, enter.centerX(), enter.centerY(), dp(21), actionIcon)
+        target(symbols, hapticFeedback = null) { actions.toggleSymbols() }
+        target(space, keySound = true) {
+            if (pinyinCandidates.isNotEmpty()) actions.chooseCandidate(pinyinCandidates.first())
+        }
+        target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
     }
 
     private fun candidates(
@@ -746,9 +805,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
         val edge = dp(5)
         val symbolWidth = (width - edge * 2 - dp(7) * 9) / 10f
-        symbolsRow(canvas, "1234567890", top, keyHeight, symbolWidth)
-        symbolsRow(canvas, "-/:;()¥&@", top + keyHeight + gap, keyHeight, symbolWidth)
-        symbolsRow(canvas, ".,?!'，。？！", top + (keyHeight + gap) * 2, keyHeight, symbolWidth)
+        val chineseSymbols = !symbolsUseEnglish
+        symbolsRow(canvas, "1234567890", top, keyHeight, symbolWidth, chineseSymbols)
+        symbolsRow(canvas, "-/:;()$&@", top + keyHeight + gap, keyHeight, symbolWidth, chineseSymbols)
+        symbolsRow(canvas, ".,?!'\"[]", top + (keyHeight + gap) * 2, keyHeight, symbolWidth, chineseSymbols)
         val y = top + (keyHeight + gap) * 3
         val controlWidth = symbolWidth * 2 + dp(7)
         val number = RectF(edge, y, edge + controlWidth, y + keyHeight)
@@ -769,9 +829,15 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
     }
 
-    private fun symbolsRow(canvas: Canvas, symbols: String, y: Float, h: Float, keyWidth: Float) {
-        // Keep the existing numeric row while replacing legacy ASCII punctuation rows with Chinese symbols.
-        val displaySymbols = when {
+    private fun symbolsRow(
+        canvas: Canvas,
+        symbols: String,
+        y: Float,
+        h: Float,
+        keyWidth: Float,
+        chineseSymbols: Boolean
+    ) {
+        val displaySymbols = if (!chineseSymbols) symbols else when {
             symbols.startsWith("-") -> "，。？！：；（）“”"
             symbols.startsWith(".") -> "、】【《》“”‘’、"
             else -> symbols
@@ -1069,7 +1135,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.action) {
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 touchDownX = event.x
                 touchDownY = event.y
@@ -1106,7 +1172,21 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 if (hit?.hold == true) hit.action()
                 invalidate()
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                val pointerIndex = event.actionIndex
+                val pointerId = event.getPointerId(pointerIndex)
+                val hit = targets.lastOrNull { it.enabled && it.box.contains(event.getX(pointerIndex), event.getY(pointerIndex)) }
+                if (hit != null) secondaryTouches[pointerId] = hit
+                cancelledSecondaryTouches.remove(pointerId)
+                return true
+            }
             MotionEvent.ACTION_MOVE -> {
+                secondaryTouches.toMap().forEach { (pointerId, target) ->
+                    val pointerIndex = event.findPointerIndex(pointerId)
+                    if (pointerIndex < 0 || !target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
+                        cancelledSecondaryTouches += pointerId
+                    }
+                }
                 if (clipboardTracking) {
                     val dx = event.x - touchDownX
                     val dy = event.y - touchDownY
@@ -1141,6 +1221,18 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                         invalidate()
                     }
                 }
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                val pointerIndex = event.actionIndex
+                val pointerId = event.getPointerId(pointerIndex)
+                val target = secondaryTouches.remove(pointerId)
+                val cancelled = cancelledSecondaryTouches.remove(pointerId)
+                if (target != null && !cancelled && target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
+                    target.hapticFeedback?.let(::emitHaptic)
+                    if (target.keySound) keySound.play(keyboardSoundVolume)
+                    target.action.invoke()
+                }
+                return true
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(repeatBackspace)
@@ -1211,6 +1303,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 }
                 activeTarget = null
                 activeTargetCancelled = false
+                secondaryTouches.clear()
+                cancelledSecondaryTouches.clear()
                 longPressTriggered = false
                 performClick()
             }
@@ -1221,6 +1315,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 activeTarget?.takeIf { longPressTriggered }?.releaseAction?.invoke()
                 activeTarget = null
                 activeTargetCancelled = false
+                secondaryTouches.clear()
+                cancelledSecondaryTouches.clear()
                 longPressTriggered = false
                 candidateDragging = false
                 candidateVelocityTracker?.recycle()

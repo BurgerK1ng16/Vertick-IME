@@ -4,6 +4,9 @@ import android.util.Base64
 import com.weike.ime.data.ModelEndpointConfig
 import com.weike.ime.network.MimoApiConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -60,6 +63,77 @@ class MimoAsrClient(
         }
     }
 
+    /** Streams OpenAI-compatible SSE ASR deltas when the configured provider supports them. */
+    fun transcribeStream(pcm: ByteArray): Flow<String> = callbackFlow {
+        val endpoint = endpointProvider()
+        if (!endpoint.isComplete()) {
+            close(IllegalStateException("请先配置 ASR 接口"))
+            return@callbackFlow
+        }
+        val audioData = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
+        val content = JSONArray().put(
+            JSONObject()
+                .put("type", "input_audio")
+                .put("input_audio", JSONObject().put("data", "data:audio/wav;base64,$audioData"))
+        )
+        val body = JSONObject()
+            .put("model", MimoApiConfig.normalizedAsrModel(endpoint.model))
+            .put("stream", true)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
+            .toString()
+            .toRequestBody("application/json; charset=utf-8".toMediaType())
+        val call = client.newCall(
+            Request.Builder()
+                .url(MimoApiConfig.chatCompletionsEndpoint(endpoint.url))
+                .header("api-key", endpoint.apiKey)
+                .header("Accept", "text/event-stream")
+                .post(body)
+                .build()
+        )
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: java.io.IOException) {
+                close(error)
+            }
+
+            override fun onResponse(call: Call, response: okhttp3.Response) {
+                response.use { result ->
+                    if (!result.isSuccessful) {
+                        close(IllegalStateException(MimoApiConfig.responseError(result, "MiMo ASR 请求失败")))
+                        return
+                    }
+                    runCatching {
+                        val source = result.body?.source() ?: return@runCatching
+                        val pending = StringBuilder()
+                        val plainResponse = StringBuilder()
+                        while (!source.exhausted()) {
+                            val line = source.readUtf8Line() ?: break
+                            if (!line.startsWith("data:")) {
+                                plainResponse.append(line)
+                                continue
+                            }
+                            val data = line.removePrefix("data:").trim()
+                            if (data.isBlank() || data == "[DONE]") continue
+                            val json = JSONObject(data)
+                            val delta = extractStreamDelta(json)
+                            if (delta.isNotBlank()) {
+                                pending.append(delta)
+                                trySend(delta)
+                            }
+                        }
+                        // Some compatible servers ignore stream=true and return one JSON object.
+                        if (pending.isEmpty() && plainResponse.isNotBlank()) {
+                            trySend(extractMessageContent(
+                                JSONObject(plainResponse.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                            ))
+                        }
+                    }.onFailure(::close)
+                    close()
+                }
+            }
+        })
+        awaitClose { call.cancel() }
+    }
+
     suspend fun testConnection(): Result<Unit> = transcribe(ByteArray(AudioRecorder.SAMPLE_RATE * 2)).map { Unit }
 
     private suspend fun <T> Call.awaitBody(transform: (okhttp3.Response) -> T): T =
@@ -88,6 +162,12 @@ class MimoAsrClient(
                 if (text.isNotBlank()) append(text)
             }
         }.trim()
+    }
+
+    private fun extractStreamDelta(payload: JSONObject): String {
+        val choice = payload.optJSONArray("choices")?.optJSONObject(0) ?: return ""
+        val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: return ""
+        return extractMessageContent(delta)
     }
 
     private fun wav(pcm: ByteArray): ByteArray {

@@ -26,6 +26,7 @@ class AppSettingsRepository(private val context: Context) {
     private val keyboardSoundVolumeKey = floatPreferencesKey("keyboard_sound_volume")
     private val historyRetentionKey = stringPreferencesKey("history_retention")
     private val keyboardModesKey = stringPreferencesKey("keyboard_modes")
+    private val chineseKeyboardLayoutKey = stringPreferencesKey("chinese_keyboard_layout")
     // Legacy plaintext keys are read once, migrated into SecureSecretStore, then deleted.
     private val asrUrlKey = stringPreferencesKey("asr_api_url")
     private val asrApiKeyKey = stringPreferencesKey("asr_api_key")
@@ -60,6 +61,10 @@ class AppSettingsRepository(private val context: Context) {
     }
     val keyboardModes = context.settingsDataStore.data.map { prefs ->
         decodeKeyboardModes(prefs[keyboardModesKey].orEmpty())
+    }
+    val chineseKeyboardLayout = context.settingsDataStore.data.map { prefs ->
+        runCatching { ChineseKeyboardLayout.valueOf(prefs[chineseKeyboardLayoutKey].orEmpty()) }
+            .getOrDefault(ChineseKeyboardLayout.FULL)
     }
     val cloudApiSettings = flow {
         migrateCloudSecrets()
@@ -129,6 +134,12 @@ class AppSettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { prefs ->
             prefs[keyboardModesKey] = normalized.joinToString(",") { it.name }
         }
+    }
+
+    suspend fun chineseKeyboardLayout(): ChineseKeyboardLayout = chineseKeyboardLayout.first()
+
+    suspend fun saveChineseKeyboardLayout(layout: ChineseKeyboardLayout) {
+        context.settingsDataStore.edit { prefs -> prefs[chineseKeyboardLayoutKey] = layout.name }
     }
 
     suspend fun clipboardHistoryEnabled(): Boolean = clipboardHistoryEnabled.first()

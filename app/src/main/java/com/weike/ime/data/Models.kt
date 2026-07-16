@@ -28,6 +28,11 @@ enum class KeyboardTheme(val displayName: String) {
     SYSTEM("自适应系统")
 }
 
+enum class ChineseKeyboardLayout(val displayName: String) {
+    FULL("26键全键盘拼音"),
+    NINE_KEY("九宫格拼音")
+}
+
 enum class HistoryRetention(val displayName: String, val durationMs: Long?) {
     NEVER("不保留", 0L),
     HOURS_24("24小时", 24L * 60L * 60L * 1000L),

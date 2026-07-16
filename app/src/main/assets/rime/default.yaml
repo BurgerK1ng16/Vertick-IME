@@ -3,6 +3,7 @@ config_version: '2026.07'
 
 schema_list:
   - schema: weike_pinyin
+  - schema: weike_t9
 
 menu:
   page_size: 9
