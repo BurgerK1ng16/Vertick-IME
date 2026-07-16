@@ -98,6 +98,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var voiceSessionId = 0L
     private var activeVoiceMode: KeyboardMode? = null
     private var activeVoicePolish = false
+    private var activeVoiceTranslation = false
     private var lastCommittedText: String? = null
     private var lastCommitConnection: InputConnection? = null
     private var lastPackageName: String? = null
@@ -407,6 +408,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         }
     }
 
+    override fun setLongPressTranslation(selected: Boolean) {
+        if (voiceState == VoiceUiState.Listening && activeVoiceMode == KeyboardMode.VOICE && activeVoicePolish) {
+            activeVoiceTranslation = selected
+        }
+    }
+
     override fun finishVoice() {
         if (voiceState == VoiceUiState.Listening) stopVoice(cancelled = false)
     }
@@ -448,6 +455,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         val sessionId = voiceSessionId
         activeVoiceMode = sessionMode
         activeVoicePolish = polish && sessionMode == KeyboardMode.VOICE
+        activeVoiceTranslation = false
         rawTranscript = ""
         audioBuffer = BoundedPcmBuffer(MAX_PCM_BYTES)
         voiceStartedAtMs = System.currentTimeMillis()
@@ -476,6 +484,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         val sessionMode = activeVoiceMode ?: if (mode == KeyboardMode.ASK) KeyboardMode.ASK else KeyboardMode.VOICE
         val askMode = sessionMode == KeyboardMode.ASK
         val polishMode = activeVoicePolish
+        val translationMode = activeVoiceTranslation
         Log.d(TAG, "stopVoice; cancelled=$cancelled; durationMs=$recordingDurationMs; state=$voiceState; sessionMode=$sessionMode")
         finishVoiceJob?.cancel()
         finishVoiceJob = null
@@ -486,11 +495,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             render()
             return
         }
-        val minimumDurationMs = if (polishMode) MINIMUM_POLISHED_RECORDING_MS else MINIMUM_RECORDING_MS
+        val minimumDurationMs = if (polishMode || translationMode) MINIMUM_POLISHED_RECORDING_MS else MINIMUM_RECORDING_MS
         if (recordingDurationMs < minimumDurationMs) {
             voiceSessionId += 1
             activeVoiceMode = null
             activeVoicePolish = false
+            activeVoiceTranslation = false
             rawTranscript = ""
             audioBuffer.clear()
             voiceState = VoiceUiState.Error("录音时间过短，请说完一句后再点完成")
@@ -545,6 +555,24 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                     sessionMode,
                     instant = true,
                     historyType = InputHistoryType.DICTATION,
+                    recordingDurationMs = recordingDurationMs
+                )
+                return@launch
+            }
+            if (translationMode) {
+                val translated = withTimeoutOrNull(TRANSLATION_TIMEOUT_MS) {
+                    ensureVoiceSession(sessionId, sessionMode)
+                    polisher.translateToAmericanEnglish(source)
+                }?.getOrElse { error ->
+                    Log.w(TAG, "Translation failed; inserting transcription", error)
+                    source
+                } ?: source
+                commitResult(
+                    translated,
+                    sessionId,
+                    sessionMode,
+                    instant = true,
+                    historyType = InputHistoryType.TRANSLATION,
                     recordingDurationMs = recordingDurationMs
                 )
                 return@launch
@@ -787,6 +815,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         voiceSessionId += 1
         activeVoiceMode = null
         activeVoicePolish = false
+        activeVoiceTranslation = false
         recorder.stop()
         voiceStartedAtMs = 0L
         activeRecordingDurationMs = 0L
@@ -1245,6 +1274,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private const val MINIMUM_POLISHED_RECORDING_MS = 350L
         private const val ASR_TIMEOUT_MS = 8_000L
         private const val FAST_POLISHING_TIMEOUT_MS = 3_500L
+        private const val TRANSLATION_TIMEOUT_MS = 8_000L
         private const val DEEP_POLISHING_TIMEOUT_MS = 8_000L
         private const val ANSWER_PROCESSING_TIMEOUT_MS = 18_000L
         private const val PROCESSING_LABEL_FADE_MS = 150L

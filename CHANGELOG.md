@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0 - 2026-07-16
+
+### English
+
+- Redesigned the long-press polish gesture with a rising lower semicircle, a floating irregular translation capsule, and smooth selection feedback.
+- Long press the voice button to begin a polish recording. Release in the lower area to polish as before, or slide upward to **English (US)** and release to translate after ASR.
+- Added a dedicated American English translation prompt to the configured text model. The original ASR text is preserved if translation fails or times out.
+
+### 简体中文
+
+- 重做长按润色手势界面：下方半圆遮罩平滑升起，并显示包裹遮罩的异形翻译胶囊。
+- 长按录音键开始润色录音，在下方区域松开保持润色；向上滑入“英语（美国）”区域后松开，则 ASR 识别后调用文本模型翻译。
+- 文本模型新增美式英语翻译提示词；翻译失败或超时时自动保留原始 ASR 转写。
+
 ## 0.1.3 - 2026-07-16
 
 ### English

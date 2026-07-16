@@ -52,6 +52,7 @@ enum class KeyboardModePreference(val displayName: String) {
 enum class InputHistoryType(val displayName: String) {
     DICTATION("听写"),
     POLISH("润色"),
+    TRANSLATION("翻译"),
     QUESTION("问答")
 }
 

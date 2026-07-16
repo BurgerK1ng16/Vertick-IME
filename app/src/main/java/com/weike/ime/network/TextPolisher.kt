@@ -52,6 +52,7 @@ interface TextPolisher {
 
     suspend fun answer(question: String): Result<String>
     fun answerStream(question: String): Flow<String>
+    suspend fun translateToAmericanEnglish(text: String): Result<String>
 }
 
 class MimoTextPolisher(
@@ -259,6 +260,33 @@ class MimoTextPolisher(
                 }
             })
             awaitClose { call.cancel() }
+        }
+    }
+
+    override suspend fun translateToAmericanEnglish(text: String): Result<String> {
+        val endpoint = endpointProvider()
+        if (!endpoint.isComplete()) return Result.failure(IllegalStateException("请先配置文本模型接口"))
+        return try {
+            val request = buildRequest(
+                endpoint = endpoint,
+                systemPrompt = "将用户文本翻译为自然、准确的美式英语。保留原意、数字、专有名词和段落；只输出译文，不要解释或添加引号。",
+                userText = text,
+                temperature = 0.1,
+                stream = false
+            )
+            Result.success(client.newCall(request).awaitBody { response ->
+                check(response.isSuccessful) { MimoApiConfig.responseError(response, "MiMo 翻译失败") }
+                extractMessageContent(
+                    JSONObject(response.body?.string().orEmpty())
+                        .getJSONArray("choices")
+                        .getJSONObject(0)
+                        .getJSONObject("message")
+                ).ifBlank { text }
+            })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
     }
 
