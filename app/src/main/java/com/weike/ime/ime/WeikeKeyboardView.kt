@@ -108,6 +108,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var modeIndicator = 0f
     private var pressedBox: RectF? = null
     private var activeTarget: TouchTarget? = null
+    private var activeTargetCancelled = false
     private var longPressTriggered = false
     private var repeatAction: (() -> Unit)? = null
     private val longPressRunnable = Runnable {
@@ -493,9 +494,17 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val elapsed = (System.currentTimeMillis() - processingStartedAt).coerceAtLeast(0L)
             streamProgress(canvas, button)
             val pulse = .8f + .2f * ((kotlin.math.sin((elapsed % 1500L) / 1500f * Math.PI * 2.0) + 1.0) / 2.0).toFloat()
-            if (mode != KeyboardMode.ASK) {
-                label(canvas, "\u6da6\u8272\u4e2d", buttonX, cy + dp(6), 16f, Color.rgb(58, 58, 60), Paint.Align.CENTER, true, pulse)
-            }
+            label(
+                canvas,
+                if (mode == KeyboardMode.ASK) "\u7ef4\u523b\u77e5\u9053" else "\u6da6\u8272\u4e2d",
+                buttonX,
+                cy + dp(6),
+                16f,
+                Color.rgb(58, 58, 60),
+                Paint.Align.CENTER,
+                true,
+                pulse
+            )
             postInvalidateOnAnimation()
         } else {
             val fill = if (leavingProcessing) blend(Color.rgb(120, 120, 123), white, completionProgress) else white
@@ -506,9 +515,17 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 voiceBars(canvas, buttonX, cy, morph)
             }
             if (leavingProcessing) {
-                if (mode != KeyboardMode.ASK) {
-                    label(canvas, "\u6da6\u8272\u4e2d", buttonX, cy + dp(6), 16f, Color.rgb(58, 58, 60), Paint.Align.CENTER, true, processingTextAlpha)
-                }
+                label(
+                    canvas,
+                    if (mode == KeyboardMode.ASK) "\u7ef4\u523b\u77e5\u9053" else "\u6da6\u8272\u4e2d",
+                    buttonX,
+                    cy + dp(6),
+                    16f,
+                    Color.rgb(58, 58, 60),
+                    Paint.Align.CENTER,
+                    true,
+                    processingTextAlpha
+                )
             }
         }
         val prompt = when {
@@ -533,7 +550,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 target(button, hapticFeedback = null) { actions.toggleVoice() }
             }
         }
-        if (!listening) {
+        if (!listening && mode != KeyboardMode.ASK) {
             val bottom = height.toFloat() - if (isLandscape()) dp(14) else dp(32)
             val newline = RectF(cx - dp(60), bottom - dp(48), cx + dp(60), bottom)
             rounded(canvas, newline, dp(24), key)
@@ -1078,6 +1095,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 answerDragStartScroll = answerScrollY
                 val hit = targets.lastOrNull { it.enabled && it.box.contains(event.x, event.y) }
                 activeTarget = hit
+                activeTargetCancelled = false
                 longPressTriggered = false
                 pressedBox = hit?.box
                 if (hit?.repeat == true) {
@@ -1112,6 +1130,16 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     answerScrollY = (answerDragStartScroll - (event.y - touchDownY)).coerceIn(0f, answerMaxScroll)
                     pressedBox = null
                     invalidate()
+                } else {
+                    val active = activeTarget
+                    if (active != null && !active.box.contains(event.x, event.y)) {
+                        activeTargetCancelled = true
+                        pressedBox = null
+                        removeCallbacks(repeatBackspace)
+                        removeCallbacks(longPressRunnable)
+                        repeatAction = null
+                        invalidate()
+                    }
                 }
             }
             MotionEvent.ACTION_UP -> {
@@ -1170,16 +1198,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 }
                 candidateVelocityTracker?.recycle()
                 candidateVelocityTracker = null
+                val active = activeTarget
                 val hit = targets.lastOrNull { it.enabled && it.box.contains(event.x, event.y) }
+                val releasedOnOriginalTarget = !activeTargetCancelled && sameBox(hit?.box, active?.box)
                 postDelayed({ pressedBox = null; invalidate() }, 100L)
-                if (longPressTriggered && hit == activeTarget) {
-                    hit?.releaseAction?.invoke()
-                } else {
+                if (longPressTriggered) {
+                    active?.releaseAction?.invoke()
+                } else if (releasedOnOriginalTarget) {
                     hit?.hapticFeedback?.let(::emitHaptic)
                     if (hit?.keySound == true) keySound.play(keyboardSoundVolume)
                     hit?.action?.invoke()
                 }
                 activeTarget = null
+                activeTargetCancelled = false
                 longPressTriggered = false
                 performClick()
             }
@@ -1189,6 +1220,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 repeatAction = null
                 activeTarget?.takeIf { longPressTriggered }?.releaseAction?.invoke()
                 activeTarget = null
+                activeTargetCancelled = false
                 longPressTriggered = false
                 candidateDragging = false
                 candidateVelocityTracker?.recycle()
@@ -1281,6 +1313,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         kotlin.math.abs(pressed.left - box.left) < 1f && kotlin.math.abs(pressed.top - box.top) < 1f &&
             kotlin.math.abs(pressed.right - box.right) < 1f && kotlin.math.abs(pressed.bottom - box.bottom) < 1f
     } == true
+    private fun sameBox(first: RectF?, second: RectF?): Boolean = first != null && second != null &&
+        kotlin.math.abs(first.left - second.left) < 1f && kotlin.math.abs(first.top - second.top) < 1f &&
+        kotlin.math.abs(first.right - second.right) < 1f && kotlin.math.abs(first.bottom - second.bottom) < 1f
     private data class TouchTarget(
         val box: RectF,
         val enabled: Boolean,

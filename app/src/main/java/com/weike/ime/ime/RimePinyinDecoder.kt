@@ -98,6 +98,21 @@ class RimePinyinDecoder(context: Context) {
         }
     }
 
+    /** Writes terms for the next native deployment without restarting a live session. */
+    suspend fun stageProfessionalTerms(
+        terms: List<LexiconTerm>,
+        typingDictionary: List<TypingDictionaryEntry> = emptyList()
+    ): Boolean = withContext(Dispatchers.Default) {
+        sessionMutex.withLock {
+            val changed = writeTerms(terms, typingDictionary)
+            if (changed) File(userDir, TERMS_PENDING_FILE).apply {
+                parentFile?.mkdirs()
+                writeText("1")
+            }
+            changed
+        }
+    }
+
     suspend fun clearUserLearning(): Boolean = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
             isReady = false
@@ -194,7 +209,7 @@ class RimePinyinDecoder(context: Context) {
             File(userDir, "build").deleteRecursively()
             versionFile.writeText(ENGINE_VERSION)
         }
-        val termsChanged = writeTerms(terms, typingDictionary)
+        val termsChanged = writeTerms(terms, typingDictionary) || File(userDir, TERMS_PENDING_FILE).delete()
         val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
         return assetsChanged || termsChanged || !compiledTable.exists() || compiledTable.length() < MIN_TABLE_BYTES
     }
@@ -257,6 +272,7 @@ class RimePinyinDecoder(context: Context) {
         const val ENGINE_VERSION_TEXT = "librime 1.17.0"
         private const val ENGINE_VERSION = "weike-rime-ice-full-2026.07.14.2"
         private const val TERMS_FILE = "weike_terms.dict.yaml"
+        private const val TERMS_PENDING_FILE = ".weike_terms_pending"
         private const val KEY_BACKSPACE = 0xff08
         private const val MAX_CANDIDATES = 96
         private const val MIN_TABLE_BYTES = 1_000_000L

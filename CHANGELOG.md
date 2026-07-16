@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.2 - 2026-07-16
+
+### English
+
+- Fixed the final uncommitted Pinyin initial being confirmed when composition is cleared. Deleting an unfinished composition now removes every letter without requiring a second delete.
+- Fixed keyboard touch handling: sliding away from a pressed key cancels it instead of inserting the key under the finger when released.
+- Removed Send, Delete, and `@` controls from Smart Q&A mode.
+- The Smart Q&A processing capsule now displays `Vertick Knows` (维刻知道) with the same progress animation used by dictation polishing.
+- Custom-term updates now stage their Rime data in the background for the next deployment and never restart the active decoder, eliminating the stall when returning to the keyboard after editing the dictionary.
+
+### 简体中文
+
+- 修复拼音组合态清空时末位字母被确认上屏的问题；未上屏拼音可以一次删完，不再需要多按一次删除。
+- 修复按键点选逻辑：按住按键后滑出原按键会取消输入，松开时不会误输入滑动位置的字母。
+- 智能问答模式移除发送、删除和 `@` 按钮。
+- 智能问答处理胶囊改为显示“维刻知道”，并沿用听写润色的进度动画。
+- 词典更新只在后台写入下次 Rime 部署所需数据，不再重启正在使用的解码器，修复新增词典后切回键盘卡顿。
+
 ## 0.1.1 - 2026-07-16
 
 ### English

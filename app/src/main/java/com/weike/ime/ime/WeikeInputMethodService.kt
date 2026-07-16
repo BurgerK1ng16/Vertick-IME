@@ -79,10 +79,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var pinyinReady = false
     private var engineLoadJob: Job? = null
     private var engineIdleReleaseJob: Job? = null
-    private var deferredRimeTermSync = false
-    private var rimeTermSyncJob: Job? = null
+    private var rimeTermStageJob: Job? = null
     private var pendingPinyinMutations = 0
-    @Volatile private var inputViewActive = false
     private var lastSyncedTerms: List<com.weike.ime.data.LexiconTerm> = emptyList()
     private var lastSyncedTypingDictionary: List<TypingDictionaryEntry> = emptyList()
     private var englishBuffer = ""
@@ -246,14 +244,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         Log.d(TAG, "onStartInputView; restarting=$restarting")
         super.onStartInputView(info, restarting)
-        inputViewActive = true
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         Log.d(TAG, "onFinishInputView; finishingInput=$finishingInput")
-        inputViewActive = false
         stopVoice(cancelled = true)
-        refreshDeferredRimeTerms()
         super.onFinishInputView(finishingInput)
     }
 
@@ -278,7 +273,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         if (::keyboard.isInitialized) keyboard.releaseResources()
         engineLoadJob?.cancel()
         engineIdleReleaseJob?.cancel()
-        rimeTermSyncJob?.cancel()
+        rimeTermStageJob?.cancel()
         runBlocking(Dispatchers.Default) {
             languageEngineMutex.withLock {
                 pinyinDecoder.shutdown()
@@ -367,27 +362,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun deferRimeTermSync() {
-        deferredRimeTermSync = true
-        // Custom terms are available immediately through the local candidate overlay.
-        // Rebuilding Rime is deferred until the input view closes, so adding a word
-        // cannot interrupt a user who is actively typing.
-    }
-
-    private fun refreshDeferredRimeTerms() {
-        if (!deferredRimeTermSync || !pinyinReady || pinyinBuffer.isNotBlank()) return
-        rimeTermSyncJob?.cancel()
-        rimeTermSyncJob = serviceScope.launch(Dispatchers.Default) {
-            delay(DEFERRED_TERM_SYNC_DELAY_MS)
-            if (inputViewActive) return@launch
-            languageEngineMutex.withLock {
-                if (!deferredRimeTermSync || !pinyinReady || inputViewActive) return@withLock
-                val synced = runCatching {
-                    pinyinMutex.withLock {
-                        pinyinDecoder.syncProfessionalTerms(lastSyncedTerms, lastSyncedTypingDictionary)
-                    }
-                }.onFailure { Log.e(TAG, "Unable to refresh deferred Rime terms", it) }.getOrDefault(false)
-                if (synced) deferredRimeTermSync = false
-            }
+        // Immediate matching uses the in-memory overlay. Persist the term list for
+        // the next Rime deployment without restarting the live decoder.
+        rimeTermStageJob?.cancel()
+        rimeTermStageJob = serviceScope.launch(Dispatchers.Default) {
+            runCatching {
+                pinyinDecoder.stageProfessionalTerms(lastSyncedTerms, lastSyncedTypingDictionary)
+            }.onFailure { Log.e(TAG, "Unable to stage Rime terms", it) }
         }
     }
 
@@ -1138,8 +1119,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     /** Keeps the raw composing code in the focused editor, not in the candidate strip. */
     private fun updateComposingText(value: String) {
         val connection = currentInputConnection ?: return
-        if (value.isBlank()) connection.finishComposingText()
-        else connection.setComposingText(value, 1)
+        if (value.isBlank()) {
+            // finishComposingText confirms the final raw character in many editors.
+            // Replace it first so the last deleted Pinyin initial cannot leak through.
+            connection.setComposingText("", 1)
+            connection.finishComposingText()
+        } else connection.setComposingText(value, 1)
     }
 
     private fun clearPinyinLearning() {
