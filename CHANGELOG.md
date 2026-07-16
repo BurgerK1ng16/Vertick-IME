@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.3 - 2026-07-16
+
+### English
+
+- English keyboard symbols now use English punctuation instead of Chinese punctuation.
+- Added independent multi-touch key handling, allowing simultaneous two-hand typing without dropping a key.
+- Added OpenAI-compatible SSE streaming for direct ASR dictation. Text is inserted as ASR deltas arrive; providers without streaming support automatically fall back to the standard request.
+- Added a Chinese primary-keyboard setting: full 26-key Pinyin or offline Rime T9 nine-key Pinyin.
+
+### 简体中文
+
+- 英文键盘的符号页改为英文标点，不再统一显示中文符号。
+- 增加独立多点触控按键处理，双手同时输入时不会丢失按键。
+- 听写支持 OpenAI 兼容 SSE 流式 ASR，识别增量到达时立即写入；服务端不支持流式时自动回退普通请求。
+- 设置页新增“中文主键盘”，可选 26 键全键盘拼音或离线 Rime 九宫格拼音。
+
 ## 0.1.2 - 2026-07-16
 
 ### English

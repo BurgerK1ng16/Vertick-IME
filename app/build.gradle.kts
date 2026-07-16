@@ -19,8 +19,8 @@ android {
         applicationId = "com.weike.ime"
         minSdk = 35
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
 
         ndk {
             // This app is intentionally built only for the user's Xiaomi 17 Pro.
