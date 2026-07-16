@@ -42,9 +42,13 @@ class MimoAsrClient(
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
                 .toString()
                 .toRequestBody("application/json; charset=utf-8".toMediaType())
+            val resolvedEndpoint = MimoApiConfig.chatCompletionsEndpoint(endpoint.url)
             val request = Request.Builder()
-                .url(MimoApiConfig.chatCompletionsEndpoint(endpoint.url))
-                .header("api-key", endpoint.apiKey)
+                .url(resolvedEndpoint)
+                .apply {
+                    if (MimoApiConfig.usesMimoApiKeyHeader(resolvedEndpoint)) header("api-key", endpoint.apiKey)
+                    else header("Authorization", "Bearer ${endpoint.apiKey}")
+                }
                 .post(body)
                 .build()
             Result.success(client.newCall(request).awaitBody { response ->
@@ -82,10 +86,14 @@ class MimoAsrClient(
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
             .toString()
             .toRequestBody("application/json; charset=utf-8".toMediaType())
+        val resolvedEndpoint = MimoApiConfig.chatCompletionsEndpoint(endpoint.url)
         val call = client.newCall(
             Request.Builder()
-                .url(MimoApiConfig.chatCompletionsEndpoint(endpoint.url))
-                .header("api-key", endpoint.apiKey)
+                .url(resolvedEndpoint)
+                .apply {
+                    if (MimoApiConfig.usesMimoApiKeyHeader(resolvedEndpoint)) header("api-key", endpoint.apiKey)
+                    else header("Authorization", "Bearer ${endpoint.apiKey}")
+                }
                 .header("Accept", "text/event-stream")
                 .post(body)
                 .build()

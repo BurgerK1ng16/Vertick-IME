@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.zip.ZipInputStream
 import java.text.Normalizer
 
 data class PinyinCandidate(
@@ -163,38 +164,21 @@ class RimePinyinDecoder(context: Context) {
     }
 
     private suspend fun startAndVerify(deploy: Boolean): Boolean {
-        // librime's full check owns its deployment worker. Calling deploySchemaFile as
-        // well starts a second compiler thread and crashes on the full Rime-Ice table.
+        // Prebuilt table, prism, reverse index, and generated schema are installed as
+        // a consistent bundle. A single schema selection verifies that librime opened
+        // it without invoking maintenance on the full source dictionary.
         Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, deploy)
-        if (waitForSchemaAndHealth()) return true
-
-        // A killed process can leave a small, incomplete table behind. Rebuild once
-        // from a clean build directory instead of leaving the keyboard permanently
-        // stuck in the preparing state.
-        runCatching { Rime.exitRime() }
-        File(userDir, "build").deleteRecursively()
-        Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, true)
-        return waitForSchemaAndHealth()
+        return waitForPrebuiltSchema()
     }
 
-    /** Selecting a schema only proves that a yaml file was found. Query real words too. */
-    private suspend fun waitForSchemaAndHealth(): Boolean {
-        repeat(360) {
-            if (Rime.selectRimeSchema(SCHEMA_ID) && verifyDictionaryHealth()) return true
+    private suspend fun waitForPrebuiltSchema(): Boolean {
+        val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
+        repeat(24) {
+            if (compiledTable.length() >= MIN_TABLE_BYTES && Rime.selectRimeSchema(SCHEMA_ID)) return true
             delay(250)
         }
         return false
     }
-
-    private fun verifyDictionaryHealth(): Boolean = runCatching {
-        val status = Rime.getRimeStatus()
-        if (status.schemaId != SCHEMA_ID || status.isDisabled) return@runCatching false
-        HEALTH_QUERIES.all { query ->
-            Rime.clearRimeComposition()
-            query.forEach { character -> Rime.processRimeKey(character.code, 0) }
-            Rime.getRimeCandidates(0, 8).isNotEmpty()
-        }.also { Rime.clearRimeComposition() }
-    }.getOrDefault(false)
 
     private fun snapshot(): PinyinSessionState {
         val context = Rime.getRimeContext()
@@ -222,13 +206,27 @@ class RimePinyinDecoder(context: Context) {
         val assetsChanged = versionFile.readTextOrEmpty() != ENGINE_VERSION
         if (assetsChanged) {
             ASSET_FILES.forEach { asset -> copyAsset("rime/$asset", File(sharedDir, asset)) }
-            // Preserve userdb learning but force compilation of the complete dictionary set.
             File(userDir, "build").deleteRecursively()
+        }
+        // Custom terms are available immediately through the in-memory candidate
+        // overlay. Do not rebuild the complete base dictionary for a term update.
+        writeTerms(terms, typingDictionary)
+        File(userDir, TERMS_PENDING_FILE).delete()
+        val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
+        if (assetsChanged || !compiledTable.exists() || compiledTable.length() < MIN_TABLE_BYTES) {
+            // Copy these *after* writing the optional term source. Rime's maintenance
+            // compares modification order; copying first made it rebuild the 1.8M-word
+            // base table because weike_terms.dict.yaml looked newer than the table.
+            PREBUILT_FILES.forEach { file ->
+                copyAsset("rime/prebuilt/$file", File(userDir, "build/$file"))
+            }
+            copyCompressedAsset(
+                "rime/prebuilt/weike_pinyin.table.bin.zip",
+                File(userDir, "build/weike_pinyin.table.bin")
+            )
             versionFile.writeText(ENGINE_VERSION)
         }
-        val termsChanged = writeTerms(terms, typingDictionary) || File(userDir, TERMS_PENDING_FILE).delete()
-        val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
-        return assetsChanged || termsChanged || !compiledTable.exists() || compiledTable.length() < MIN_TABLE_BYTES
+        return false
     }
 
     private fun writeTerms(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>): Boolean {
@@ -283,12 +281,23 @@ class RimePinyinDecoder(context: Context) {
         appContext.assets.open(asset).use { input -> destination.outputStream().use(input::copyTo) }
     }
 
+    private fun copyCompressedAsset(asset: String, destination: File) {
+        destination.parentFile?.mkdirs()
+        appContext.assets.open(asset).use { input ->
+            ZipInputStream(input).use { zip ->
+                check(zip.nextEntry != null) { "预编译词典资源损坏" }
+                destination.outputStream().use(zip::copyTo)
+            }
+        }
+    }
+
     companion object {
         const val SCHEMA_ID = "weike_pinyin"
         const val T9_SCHEMA_ID = "weike_t9"
         const val DICTIONARY_VERSION = "Rime-Ice Full Chinese 2026.07.07"
         const val ENGINE_VERSION_TEXT = "librime 1.17.0"
-        private const val ENGINE_VERSION = "weike-rime-ice-full-2026.07.16.3"
+        // Includes the release-built Rime-Ice table and prism for immediate first use.
+        private const val ENGINE_VERSION = "weike-rime-ice-prebuilt-2026.07.16.1"
         private const val TERMS_FILE = "weike_terms.dict.yaml"
         private const val TERMS_PENDING_FILE = ".weike_terms_pending"
         private const val KEY_BACKSPACE = 0xff08
@@ -308,6 +317,13 @@ class RimePinyinDecoder(context: Context) {
             "cn_dicts/ext.dict.yaml",
             "cn_dicts/tencent.dict.yaml",
             "cn_dicts/others.dict.yaml"
+        )
+        private val PREBUILT_FILES = listOf(
+            "default.yaml",
+            "weike_pinyin.prism.bin",
+            "weike_pinyin.reverse.bin",
+            "weike_pinyin.schema.yaml",
+            "weike_t9.schema.yaml"
         )
 
         @Volatile private var cachedTermReadings: Map<Char, String>? = null

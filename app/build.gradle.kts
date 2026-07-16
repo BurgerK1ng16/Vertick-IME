@@ -19,8 +19,8 @@ android {
         applicationId = "com.weike.ime"
         minSdk = 35
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.2.2"
+        versionCode = 8
+        versionName = "1.2.3"
 
         ndk {
             // This app is intentionally built only for the user's Xiaomi 17 Pro.
@@ -62,7 +62,7 @@ android {
 
     androidResources {
         // Jieba models are copied verbatim into the private native-data directory.
-        noCompress += setOf("utf8")
+        noCompress += setOf("utf8", "bin")
     }
 
     compileOptions {

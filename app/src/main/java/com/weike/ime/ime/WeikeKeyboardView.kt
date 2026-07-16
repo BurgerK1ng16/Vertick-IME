@@ -1323,7 +1323,18 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                         invalidate()
                         return true
                     }
-                    val selected = event.y <= touchDownY - dp(86)
+                    // Select translation by the actual floating target instead of a
+                    // distance from the initial touch, so it tracks the visible capsule.
+                    val capsuleHeight = dp(68)
+                    val capsuleBottom = height - height * .52f * holdOverlayProgress - dp(18)
+                    val capsuleWidth = width * .66f
+                    val translationTarget = RectF(
+                        width / 2f - capsuleWidth / 2f,
+                        capsuleBottom - capsuleHeight - dp(18),
+                        width / 2f + capsuleWidth / 2f,
+                        capsuleBottom + dp(18)
+                    )
+                    val selected = translationTarget.contains(event.x, event.y)
                     if (selected != longPressTranslationSelected) {
                         longPressTranslationSelected = selected
                         actions.setLongPressTranslation(selected)
