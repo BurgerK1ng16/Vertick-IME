@@ -166,12 +166,20 @@ class RimePinyinDecoder(context: Context) {
         // librime's full check owns its deployment worker. Calling deploySchemaFile as
         // well starts a second compiler thread and crashes on the full Rime-Ice table.
         Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, deploy)
+        if (waitForSchemaAndHealth()) return true
+
+        // A killed process can leave a small, incomplete table behind. Rebuild once
+        // from a clean build directory instead of leaving the keyboard permanently
+        // stuck in the preparing state.
+        runCatching { Rime.exitRime() }
+        File(userDir, "build").deleteRecursively()
+        Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, true)
         return waitForSchemaAndHealth()
     }
 
     /** Selecting a schema only proves that a yaml file was found. Query real words too. */
     private suspend fun waitForSchemaAndHealth(): Boolean {
-        repeat(180) {
+        repeat(360) {
             if (Rime.selectRimeSchema(SCHEMA_ID) && verifyDictionaryHealth()) return true
             delay(250)
         }

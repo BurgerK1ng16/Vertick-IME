@@ -541,9 +541,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 return@launch
             }
             val activePunctuation = if (askMode) punctuation else container.settings.punctuationPreference()
-            if (!askMode && !polishMode && streamDirectDictation(pcm, sessionId, sessionMode, recordingDurationMs, activePunctuation)) {
-                return@launch
-            }
             val transcription = withTimeoutOrNull(ASR_TIMEOUT_MS) {
                 ensureVoiceSession(sessionId, sessionMode)
                 asrClient.transcribe(pcm)
@@ -732,52 +729,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         toastFor("识别超时，请重试", 1_500L)
         voiceState = VoiceUiState.Idle
         render()
-    }
-
-    /** Inserts ASR deltas as they arrive and falls back to the non-streaming request if none arrive. */
-    private suspend fun streamDirectDictation(
-        pcm: ByteArray,
-        sessionId: Long,
-        sessionMode: KeyboardMode,
-        recordingDurationMs: Long,
-        punctuation: PunctuationPreference
-    ): Boolean {
-        val connection = currentInputConnection ?: return false
-        val raw = StringBuilder()
-        var receivedDelta = false
-        val completed = runCatching {
-            withTimeoutOrNull(ASR_TIMEOUT_MS) {
-                asrClient.transcribeStream(pcm).collect { delta ->
-                    ensureVoiceSession(sessionId, sessionMode)
-                    if (delta.isBlank()) return@collect
-                    connection.commitText(delta, 1)
-                    raw.append(delta)
-                    receivedDelta = true
-                    rawTranscript = raw.toString()
-                }
-                true
-            } ?: false
-        }.getOrElse { error ->
-            Log.w(TAG, "Streaming ASR unavailable; using standard request", error)
-            false
-        }
-        if (!receivedDelta) return false
-
-        val finalText = applyPunctuationPreference(raw.toString(), punctuation)
-        if (finalText != raw.toString()) {
-            connection.deleteSurroundingText(raw.length, 0)
-            connection.commitText(finalText, 1)
-        }
-        rawTranscript = finalText
-        lastCommittedText = finalText
-        lastCommitConnection = connection
-        persistDictation(InputHistoryType.DICTATION, finalText, recordingDurationMs)
-        if (isCurrentVoiceSession(sessionId, sessionMode)) {
-            activeVoiceMode = null
-            voiceState = VoiceUiState.Idle
-            render()
-        }
-        return completed || receivedDelta
     }
 
     private fun commitResult(

@@ -125,6 +125,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var longPressVoiceBox: RectF? = null
     private var holdOverlayProgress = 0f
     private var repeatAction: (() -> Unit)? = null
+    private var repeatHaptic: Int? = null
+    private var repeatIntervalMs = 92L
     private val longPressRunnable = Runnable {
         val target = activeTarget ?: return@Runnable
         val action = target.longPressAction ?: return@Runnable
@@ -140,7 +142,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private val repeatBackspace = object : Runnable {
         override fun run() {
             repeatAction?.invoke() ?: return
-            postDelayed(this, 58L)
+            repeatHaptic?.let(::emitHaptic)
+            repeatIntervalMs = (repeatIntervalMs * .86f).toLong().coerceAtLeast(34L)
+            postDelayed(this, repeatIntervalMs)
         }
     }
     private var processingStartedAt = 0L
@@ -513,6 +517,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val button = RectF(buttonX - buttonWidth / 2, cy - buttonHeight / 2, buttonX + buttonWidth / 2, cy + buttonHeight / 2)
         val listening = state == VoiceUiState.Listening
         val processing = state == VoiceUiState.Processing
+        if (longPressTriggered && mode == KeyboardMode.VOICE) {
+            drawLongPressTranslationOverlay(canvas)
+            return
+        }
         if (processing) {
             rounded(canvas, button, buttonHeight / 2, Color.rgb(120, 120, 123))
             val elapsed = (System.currentTimeMillis() - processingStartedAt).coerceAtLeast(0L)
@@ -590,7 +598,6 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             lucide(canvas, R.drawable.ic_lucide_at_sign, sideX, atY, dp(21), muted)
             target(RectF(sideX - dp(25), atY - dp(25), sideX + dp(25), atY + dp(25))) { actions.insertAt() }
         }
-        if (longPressTriggered && mode == KeyboardMode.VOICE) drawLongPressTranslationOverlay(canvas)
     }
 
     private fun drawLongPressTranslationOverlay(canvas: Canvas) {
@@ -599,16 +606,22 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val centerX = width / 2f
         val maskTop = height - height * .52f * progress
         val mask = RectF(-dp(32), maskTop, width + dp(32), height + dp(32))
-        rounded(canvas, mask, width.toFloat() / 2f, blend(key, Color.rgb(190, 190, 193), progress))
-        label(canvas, "松开以${if (longPressTranslationSelected) "翻译" else "润色"}", centerX, maskTop + dp(48), 19f, actionIcon, Paint.Align.CENTER, true)
+        val polishColor = if (longPressTranslationSelected) Color.rgb(190, 190, 193) else key
+        rounded(canvas, mask, width.toFloat() / 2f, blend(key, polishColor, progress))
+        label(canvas, "松开以润色", centerX, maskTop + dp(48), 19f, actionIcon, Paint.Align.CENTER, true)
 
         val capsuleWidth = width * .66f
         val capsuleHeight = dp(68)
         val capsuleBottom = maskTop - dp(18)
         val capsule = RectF(centerX - capsuleWidth / 2f, capsuleBottom - capsuleHeight, centerX + capsuleWidth / 2f, capsuleBottom)
-        rounded(canvas, capsule, capsuleHeight / 2f, blend(key, Color.rgb(226, 226, 228), progress))
+        val translationColor = if (longPressTranslationSelected) key else Color.rgb(226, 226, 228)
+        rounded(canvas, capsule, capsuleHeight / 2f, blend(key, translationColor, progress))
         label(canvas, "英语（美国）", centerX, capsule.centerY() + dp(7), 22f, actionIcon, Paint.Align.CENTER, true)
         label(canvas, "向上滑动以翻译", centerX, capsule.top - dp(18), 14f, muted, Paint.Align.CENTER, true)
+        val close = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
+        rounded(canvas, close, dp(19), tabBackground)
+        lucide(canvas, R.drawable.ic_lucide_x, close.centerX(), close.centerY(), dp(17), muted)
+        target(close, hapticFeedback = HapticFeedbackConstants.GESTURE_END) { actions.cancelVoice() }
         postInvalidateOnAnimation()
     }
 
@@ -716,9 +729,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val mainRight = width - edge - actionWidth - gap
         val keyWidth = (mainRight - mainLeft - gap * 2) / 3f
         val rows = listOf(
-            listOf("ABC" to "2", "DEF" to "3", "GHI" to "4"),
-            listOf("JKL" to "5", "MNO" to "6", "PQRS" to "7"),
-            listOf("TUV" to "8", "WXYZ" to "9", "'" to "'")
+            listOf("'" to "'", "ABC" to "2", "DEF" to "3"),
+            listOf("GHI" to "4", "JKL" to "5", "MNO" to "6"),
+            listOf("PQRS" to "7", "TUV" to "8", "WXYZ" to "9")
         )
         rows.forEachIndexed { rowIndex, row ->
             val y = top + (keyHeight + gap) * rowIndex
@@ -774,7 +787,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val y = viewport.top + index * itemHeight - nineKeySymbolScrollY
             val box = RectF(viewport.left, y, viewport.right, y + itemHeight - dp(1))
             key(canvas, box)
-            fittedLabel(canvas, symbol, box, 21f, white, false)
+            fittedLabel(canvas, symbol, RectF(box).apply { offset(dp(3), 0f) }, 21f, white, false)
             val targetBox = RectF(box).apply { intersect(viewport) }
             target(targetBox, keySound = true) { actions.typeEnglish(symbol) }
         }
@@ -1245,6 +1258,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 pressedBox = hit?.box
                 if (hit?.repeat == true) {
                     repeatAction = hit.action
+                    repeatHaptic = hit.hapticFeedback
+                    repeatIntervalMs = 92L
                     postDelayed(repeatBackspace, 360L)
                 }
                 if (hit?.longPressAction != null) postDelayed(longPressRunnable, 420L)
@@ -1295,6 +1310,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     pressedBox = null
                     invalidate()
                 } else if (longPressTriggered && longPressVoiceBox != null) {
+                    val close = RectF(width - dp(54), dp(4), width - dp(2), dp(56))
+                    if (close.contains(event.x, event.y)) {
+                        removeCallbacks(longPressRunnable)
+                        repeatAction = null
+                        repeatHaptic = null
+                        actions.cancelVoice()
+                        activeTargetCancelled = true
+                        longPressTriggered = false
+                        longPressVoiceBox = null
+                        animateHoldOverlay(show = false)
+                        invalidate()
+                        return true
+                    }
                     val selected = event.y <= touchDownY - dp(86)
                     if (selected != longPressTranslationSelected) {
                         longPressTranslationSelected = selected
@@ -1331,6 +1359,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 removeCallbacks(repeatBackspace)
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
+                repeatHaptic = null
                 if (clipboardTracking) {
                     val entry = clipboardTouchedEntry
                     val dx = event.x - touchDownX
@@ -1409,6 +1438,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 removeCallbacks(repeatBackspace)
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
+                repeatHaptic = null
                 activeTarget?.takeIf { longPressTriggered }?.releaseAction?.invoke()
                 activeTarget = null
                 activeTargetCancelled = false

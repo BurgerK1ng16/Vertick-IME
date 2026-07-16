@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.2 - 2026-07-16
+
+### English
+
+- Hardened Rime-Ice deployment: the health check now allows a realistic first-build window and automatically removes an incomplete compiled table before rebuilding once.
+- Polishing and translation long-press UI no longer overlaps the listening capsule. Dragging into translation now swaps the visual emphasis between the polish area and translation capsule; drag to the top-right close control to cancel recording.
+- Long-press Delete now accelerates smoothly with one matching haptic pulse per deleted character.
+- Direct dictation no longer inserts streaming ASR deltas. Text is cleaned locally, including punctuation preferences, before it is committed once.
+- Reordered the nine-key keypad with the separator key first, and moved sidebar punctuation 3dp right for optical centering.
+
+### 简体中文
+
+- 强化 Rime-Ice 词典部署：首次完整编译获得更合理的健康检查时长；失败时会自动清理不完整编译表并重建一次。
+- 长按润色/翻译界面不再与拾音胶囊重叠；拖入翻译区时润色区与翻译胶囊深浅互换，拖到右上角关闭按钮可直接取消录音。
+- 所有删除键长按连续删除时会平滑加速，并保持每删除一个字符对应一次触感反馈。
+- 听写不再流式直写；识别完成后先执行本地清洗和标点习惯处理，再一次性提交文本。
+- 九宫格将分隔符键调整到首位并重排数字，左侧符号整体右移 3dp 以获得更好的视觉居中。
+
 ## 1.2.1 - 2026-07-16
 
 ### English
