@@ -79,6 +79,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var pinyinReady = false
     private var engineLoadJob: Job? = null
     private var engineIdleReleaseJob: Job? = null
+    private var deferredRimeTermSync = false
+    private var rimeTermSyncJob: Job? = null
+    private var pendingPinyinMutations = 0
+    @Volatile private var inputViewActive = false
     private var lastSyncedTerms: List<com.weike.ime.data.LexiconTerm> = emptyList()
     private var lastSyncedTypingDictionary: List<TypingDictionaryEntry> = emptyList()
     private var englishBuffer = ""
@@ -109,6 +113,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun onCreate() {
         super.onCreate()
+        retainedKeyboardMode?.let { mode = it }
         container = AppContainer(this)
         recorder = AudioRecorder(this)
         pinyinDecoder = RimePinyinDecoder(this)
@@ -169,22 +174,16 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             lastSyncedTerms = container.lexicon.all()
             lastSyncedTypingDictionary = container.typingDictionary.all()
             EnglishCandidateEngine.initialize(this@WeikeInputMethodService, container.englishLearning.all(), lastSyncedTypingDictionary)
+            requestPinyinEngine()
             container.lexicon.observeAll().collect { terms ->
                 if (terms == lastSyncedTerms) return@collect
                 lastSyncedTerms = terms
-                languageEngineMutex.withLock {
-                    if (jieba.isReady) jieba.syncProfessionalTerms(terms)
-                    if (pinyinReady) {
-                        pinyinReady = false
-                        render()
-                        pinyinReady = runCatching {
-                            pinyinMutex.withLock { pinyinDecoder.syncProfessionalTerms(terms, lastSyncedTypingDictionary) }
-                        }
-                            .onFailure { Log.e(TAG, "Unable to update Rime terms", it) }
-                            .getOrDefault(false)
+                if (jieba.isReady) {
+                    serviceScope.launch(Dispatchers.Default) {
+                        languageEngineMutex.withLock { jieba.syncProfessionalTerms(terms) }
                     }
                 }
-                render()
+                deferRimeTermSync()
             }
         }
         serviceScope.launch {
@@ -192,15 +191,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 if (entries == lastSyncedTypingDictionary) return@collect
                 lastSyncedTypingDictionary = entries
                 EnglishCandidateEngine.syncTypingDictionary(entries)
-                if (!pinyinReady) return@collect
-                languageEngineMutex.withLock {
-                    pinyinReady = false
-                    render()
-                    pinyinReady = runCatching {
-                        pinyinMutex.withLock { pinyinDecoder.syncProfessionalTerms(lastSyncedTerms, entries) }
-                    }.onFailure { Log.e(TAG, "Unable to update typing dictionary", it) }.getOrDefault(false)
-                }
-                render()
+                deferRimeTermSync()
             }
         }
         serviceScope.launch {
@@ -255,12 +246,14 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         Log.d(TAG, "onStartInputView; restarting=$restarting")
         super.onStartInputView(info, restarting)
+        inputViewActive = true
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         Log.d(TAG, "onFinishInputView; finishingInput=$finishingInput")
+        inputViewActive = false
         stopVoice(cancelled = true)
-        scheduleLanguageEngineRelease()
+        refreshDeferredRimeTerms()
         super.onFinishInputView(finishingInput)
     }
 
@@ -275,6 +268,9 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             keyboardTheme = resolveKeyboardTheme(keyboardThemePreference)
             render()
         }
+        if (::keyboard.isInitialized) keyboard.requestLayout()
+        if (mode == KeyboardMode.PINYIN) requestPinyinEngine()
+        render()
     }
 
     override fun onDestroy() {
@@ -282,6 +278,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         if (::keyboard.isInitialized) keyboard.releaseResources()
         engineLoadJob?.cancel()
         engineIdleReleaseJob?.cancel()
+        rimeTermSyncJob?.cancel()
         runBlocking(Dispatchers.Default) {
             languageEngineMutex.withLock {
                 pinyinDecoder.shutdown()
@@ -316,6 +313,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private fun applyMode(nextMode: KeyboardMode) {
         val previous = mode
         mode = nextMode
+        if (mode != KeyboardMode.SYMBOLS) retainedKeyboardMode = mode
         if (mode == KeyboardMode.PINYIN) requestPinyinEngine()
         if (previous == KeyboardMode.PINYIN && mode != KeyboardMode.PINYIN) scheduleLanguageEngineRelease()
         render()
@@ -363,20 +361,33 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun scheduleLanguageEngineRelease() {
+        // Keeping Rime warm prevents the loading state whenever the IME is reopened.
+        // Resources are released only when the IME service is destroyed.
         engineIdleReleaseJob?.cancel()
-        if (!pinyinReady && !jieba.isReady) return
-        engineIdleReleaseJob = serviceScope.launch {
-            delay(LANGUAGE_ENGINE_IDLE_TIMEOUT_MS)
-            if (voiceState == VoiceUiState.Listening || voiceState == VoiceUiState.Processing || pinyinBuffer.isNotBlank()) {
-                scheduleLanguageEngineRelease()
-                return@launch
-            }
+    }
+
+    private fun deferRimeTermSync() {
+        deferredRimeTermSync = true
+        // Custom terms are available immediately through the local candidate overlay.
+        // Rebuilding Rime is deferred until the input view closes, so adding a word
+        // cannot interrupt a user who is actively typing.
+    }
+
+    private fun refreshDeferredRimeTerms() {
+        if (!deferredRimeTermSync || !pinyinReady || pinyinBuffer.isNotBlank()) return
+        rimeTermSyncJob?.cancel()
+        rimeTermSyncJob = serviceScope.launch(Dispatchers.Default) {
+            delay(DEFERRED_TERM_SYNC_DELAY_MS)
+            if (inputViewActive) return@launch
             languageEngineMutex.withLock {
-                pinyinDecoder.shutdown()
-                jieba.release()
-                pinyinReady = false
+                if (!deferredRimeTermSync || !pinyinReady || inputViewActive) return@withLock
+                val synced = runCatching {
+                    pinyinMutex.withLock {
+                        pinyinDecoder.syncProfessionalTerms(lastSyncedTerms, lastSyncedTypingDictionary)
+                    }
+                }.onFailure { Log.e(TAG, "Unable to refresh deferred Rime terms", it) }.getOrDefault(false)
+                if (synced) deferredRimeTermSync = false
             }
-            render()
         }
     }
 
@@ -847,16 +858,27 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun typePinyin(value: String) {
         if (!pinyinReady) {
             requestPinyinEngine()
-            toast("${pinyinDecoder.statusText}，请稍候")
             return
         }
         engineIdleReleaseJob?.cancel()
-        enqueuePinyin { applyPinyinState(pinyinDecoder.input(value.lowercase())) }
+        pendingPinyinMutations += 1
+        enqueuePinyin {
+            try {
+                // Rime can emit a raw unfinished initial. Only explicit candidate
+                // selection is allowed to reach the focused editor.
+                applyPinyinState(pinyinDecoder.input(value.lowercase()), allowCommit = false)
+            } finally {
+                pendingPinyinMutations -= 1
+            }
+        }
     }
 
     override fun chooseCandidate(candidate: PinyinCandidate) {
-        if (candidate.index < 0 || !pinyinReady) return
-        enqueuePinyin { applyPinyinState(pinyinDecoder.selectCandidate(candidate.index)) }
+        if (!pinyinReady) return
+        enqueuePinyin {
+            if (candidate.directCommit) commitDirectPinyin(candidate.text)
+            else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
+        }
     }
 
     override fun chooseEnglishCandidate(value: String) {
@@ -882,18 +904,14 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun backspace() {
-        if (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotEmpty()) {
+        if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
+            pendingPinyinMutations += 1
             enqueuePinyin {
-                if (pinyinBuffer.length == 1) {
-                    // Rime may emit an unfinished initial as a commit while deleting it.
-                    // Clear the final composing character explicitly so it never reaches the editor.
-                    pinyinDecoder.clear()
-                    pinyinBuffer = ""
-                    pinyinCandidates = emptyList()
-                    updateComposingText("")
-                    render()
-                } else {
+                try {
+                    // Never apply Rime's automatic commit while editing composition.
                     applyPinyinState(pinyinDecoder.backspace(), allowCommit = false)
+                } finally {
+                    pendingPinyinMutations -= 1
                 }
             }
         } else if (mode == KeyboardMode.ENGLISH && englishBuffer.isNotEmpty()) {
@@ -907,7 +925,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun enter() {
-        finishCompositionThen { currentInputConnection?.performEditorAction(EditorInfo.IME_ACTION_SEND) }
+        if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
+            enqueuePinyin { commitRawPinyin() }
+        } else {
+            finishCompositionThen { currentInputConnection?.performEditorAction(EditorInfo.IME_ACTION_SEND) }
+        }
     }
 
     override fun newline() {
@@ -1004,14 +1026,64 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private fun applyPinyinState(state: PinyinSessionState, allowCommit: Boolean = true) {
         if (allowCommit) state.committedText?.let { currentInputConnection?.commitText(it, 1) }
         pinyinBuffer = state.preedit
-        pinyinCandidates = state.candidates
+        pinyinCandidates = mergeCustomPinyinCandidates(state.preedit, state.candidates)
         updateComposingText(pinyinBuffer)
         render()
     }
 
     private suspend fun commitCurrentPinyin() {
         val candidate = pinyinCandidates.firstOrNull() ?: return
-        applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
+        if (candidate.directCommit) commitDirectPinyin(candidate.text)
+        else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
+    }
+
+    private suspend fun commitRawPinyin() {
+        val raw = pinyinDecoder.currentState().preedit.ifBlank { pinyinBuffer }
+        pinyinDecoder.clear()
+        pinyinBuffer = ""
+        pinyinCandidates = emptyList()
+        updateComposingText("")
+        if (raw.isNotBlank()) currentInputConnection?.commitText(raw, 1)
+        render()
+    }
+
+    private suspend fun commitDirectPinyin(text: String) {
+        pinyinDecoder.clear()
+        pinyinBuffer = ""
+        pinyinCandidates = emptyList()
+        updateComposingText("")
+        currentInputConnection?.commitText(text, 1)
+        render()
+    }
+
+    private fun mergeCustomPinyinCandidates(
+        preedit: String,
+        nativeCandidates: List<PinyinCandidate>
+    ): List<PinyinCandidate> {
+        val query = preedit.lowercase().replace("'", "").trim()
+        if (query.isBlank()) return nativeCandidates
+        val custom = (lastSyncedTypingDictionary.map { it.term to it.hint } + lastSyncedTerms.map { it.term to it.hint })
+            .asSequence()
+            .mapNotNull { (term, hint) ->
+                val codeParts = pinyinDecoder.pinyinCodeForTerm(term, hint)
+                    .split(' ')
+                    .filter(String::isNotBlank)
+                if (codeParts.isEmpty()) return@mapNotNull null
+                val fullCode = codeParts.joinToString("")
+                val initials = codeParts.joinToString("") { it.take(1) }
+                val fullMatch = query == fullCode
+                val initialsMatch = query.length >= 3 && initials.startsWith(query)
+                if (fullMatch || initialsMatch) PinyinCandidate(
+                    text = term,
+                    score = Double.MAX_VALUE,
+                    index = -1,
+                    directCommit = true
+                ) else null
+            }
+            .distinctBy { it.text }
+            .toList()
+        if (custom.isEmpty()) return nativeCandidates
+        return custom + nativeCandidates.filterNot { native -> custom.any { it.text == native.text } }
     }
 
     private fun enqueuePinyin(block: suspend () -> Unit) {
@@ -1103,6 +1175,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     companion object {
         private const val TAG = "WeikeIme"
+        @Volatile private var retainedKeyboardMode: KeyboardMode? = null
         private const val MINIMUM_RECORDING_MS = 700L
         private const val MINIMUM_POLISHED_RECORDING_MS = 350L
         private const val ASR_TIMEOUT_MS = 8_000L
@@ -1112,6 +1185,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private const val PROCESSING_LABEL_FADE_MS = 150L
         private const val TYPEWRITER_CHARACTER_DELAY_MS = 16L
         private const val LANGUAGE_ENGINE_IDLE_TIMEOUT_MS = 5L * 60L * 1000L
+        private const val DEFERRED_TERM_SYNC_DELAY_MS = 1_000L
         private const val MAX_PCM_BYTES = AudioRecorder.MAX_RECORDING_SECONDS * AudioRecorder.SAMPLE_RATE * 2
         private val INPUT_UNIT_PATTERN = Regex("[\\u4E00-\\u9FFF]|[A-Za-z]+(?:['-][A-Za-z]+)*|\\d+(?:[.,]\\d+)?")
         private const val MAX_CLIPBOARD_CONTENT_LENGTH = 4_096

@@ -12,7 +12,12 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.Normalizer
 
-data class PinyinCandidate(val text: String, val score: Double = 0.0, val index: Int = -1)
+data class PinyinCandidate(
+    val text: String,
+    val score: Double = 0.0,
+    val index: Int = -1,
+    val directCommit: Boolean = false
+)
 
 data class PinyinSessionState(
     val preedit: String = "",
@@ -73,6 +78,14 @@ class RimePinyinDecoder(context: Context) {
     }
 
     suspend fun commitFirst(): PinyinSessionState = selectCandidate(0)
+
+    suspend fun currentState(): PinyinSessionState = nativeState {
+        if (!isReady) PinyinSessionState() else snapshot()
+    }
+
+    /** Uses the same reading lookup as the generated Rime custom dictionary. */
+    fun pinyinCodeForTerm(term: String, hint: String): String =
+        normalizePinyin(hint).ifBlank { readingsForTerm(term.trim()) }
 
     suspend fun syncProfessionalTerms(
         terms: List<LexiconTerm>,
@@ -196,7 +209,7 @@ class RimePinyinDecoder(context: Context) {
         val rows = allTerms.asSequence().mapNotNull { (termText, hint) ->
             val term = LexiconTerm(termText, hint)
             val text = term.term.trim().replace(Regex("[\\t\\r\\n]+"), " ")
-            val code = normalizePinyin(term.hint).ifBlank { readingsForTerm(text) }
+            val code = pinyinCodeForTerm(text, term.hint)
             val weight = if (customByTerm.containsKey(text)) 9_999_999 else 1_000_000
             if (text.isBlank() || code.isBlank()) null else "$text\t$code\t$weight"
         }.distinct().joinToString("\n")

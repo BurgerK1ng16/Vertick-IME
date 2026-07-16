@@ -1,6 +1,7 @@
 package com.weike.ime.ime
 
 import android.content.Context
+import android.content.res.Configuration
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -317,7 +318,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = dp(330).toInt()
+        val desired = if (isLandscape()) dp(238).toInt() else dp(330).toInt()
         setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
     }
 
@@ -478,10 +479,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             return
         }
         val cx = width / 2f
-        val cy = dp(174)
+        val cy = if (isLandscape()) height * .48f else dp(174)
         val morph = voiceMorph
-        val buttonWidth = dp(188) - dp(56) * morph
-        val buttonHeight = dp(64) + dp(68) * morph
+        val sizeScale = if (isLandscape()) .78f else 1f
+        val buttonWidth = dp((188f * sizeScale).toInt()) - dp((56f * sizeScale).toInt()) * morph
+        val buttonHeight = dp((64f * sizeScale).toInt()) + dp((68f * sizeScale).toInt()) * morph
         val buttonX = cx + shakeOffset
         val button = RectF(buttonX - buttonWidth / 2, cy - buttonHeight / 2, buttonX + buttonWidth / 2, cy + buttonHeight / 2)
         val listening = state == VoiceUiState.Listening
@@ -532,7 +534,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             }
         }
         if (!listening) {
-            val bottom = height.toFloat() - dp(32)
+            val bottom = height.toFloat() - if (isLandscape()) dp(14) else dp(32)
             val newline = RectF(cx - dp(60), bottom - dp(48), cx + dp(60), bottom)
             rounded(canvas, newline, dp(24), key)
             label(canvas, "\u53d1\u9001", newline.centerX(), newline.centerY() + dp(5), 14f, muted, Paint.Align.CENTER)
@@ -1267,6 +1269,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun dp(value: Int): Float = value * resources.displayMetrics.density
+    private fun isLandscape(): Boolean =
+        resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private fun hasComposition(): Boolean =
         (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) ||
             (mode == KeyboardMode.ENGLISH && englishBuffer.isNotBlank())
