@@ -7,12 +7,14 @@
 - The complete Rime-Ice Pinyin table is now precompiled and bundled with the APK. New installations unpack and load it directly instead of compiling 1.8 million dictionary entries on the phone.
 - First-run typing is available immediately after the bundled table is copied; dictionary preparation no longer blocks the keyboard or consumes substantial memory.
 - Fixed the Rime readiness check so it validates the loaded prebuilt schema once without repeatedly reopening or rebuilding the dictionary.
+- Added a candidate safety fallback: an incompatible prebuilt table cannot leave the candidate strip empty; typing remains usable while the dictionary is recovered.
 
 ### 简体中文
 
 - 完整 Rime-Ice 拼音词典表现已预编译并随 APK 提供。新安装仅解压、加载词典，不再在手机上编译约 188 万词条。
 - 首次进入即可使用手打键盘；词典准备不再阻塞输入或占用大量内存。
 - 修复 Rime 就绪检测：仅验证一次已加载的预编译方案，不再反复重载或重建词典。
+- 增加候选保护：预编译表异常时不会留下空的“正在匹配中”候选栏，手打仍可继续使用。
 
 ## 1.2.2 - 2026-07-16
 

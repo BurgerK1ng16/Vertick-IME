@@ -1083,7 +1083,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private fun applyPinyinState(state: PinyinSessionState, allowCommit: Boolean = true) {
         if (allowCommit) state.committedText?.let { currentInputConnection?.commitText(it, 1) }
         pinyinBuffer = state.preedit
-        pinyinCandidates = mergeCustomPinyinCandidates(state.preedit, state.candidates)
+        val merged = mergeCustomPinyinCandidates(state.preedit, state.candidates)
+        pinyinCandidates = if (merged.isNotEmpty() || state.preedit.isBlank()) merged else fallbackPinyinCandidates(state.preedit)
         updateComposingText(pinyinBuffer)
         render()
     }

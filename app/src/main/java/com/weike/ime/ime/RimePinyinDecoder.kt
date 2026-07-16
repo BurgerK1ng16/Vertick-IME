@@ -174,7 +174,15 @@ class RimePinyinDecoder(context: Context) {
     private suspend fun waitForPrebuiltSchema(): Boolean {
         val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
         repeat(24) {
-            if (compiledTable.length() >= MIN_TABLE_BYTES && Rime.selectRimeSchema(SCHEMA_ID)) return true
+            if (compiledTable.length() >= MIN_TABLE_BYTES && Rime.selectRimeSchema(SCHEMA_ID)) {
+                // One non-mutating startup probe. Unlike the old polling loop this
+                // runs once, after the prebuilt table is already present.
+                Rime.clearRimeComposition()
+                Rime.processRimeKey('n'.code, 0)
+                val healthy = Rime.getRimeCandidates(0, 1).isNotEmpty()
+                Rime.clearRimeComposition()
+                return healthy
+            }
             delay(250)
         }
         return false
