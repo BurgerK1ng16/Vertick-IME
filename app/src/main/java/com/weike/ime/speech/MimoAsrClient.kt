@@ -49,12 +49,12 @@ class MimoAsrClient(
                 .build()
             Result.success(client.newCall(request).awaitBody { response ->
                 check(response.isSuccessful) { MimoApiConfig.responseError(response, "MiMo ASR 请求失败") }
-                extractMessageContent(
+                cleanTranscript(extractMessageContent(
                     JSONObject(response.body?.string().orEmpty())
                         .getJSONArray("choices")
                         .getJSONObject(0)
                         .getJSONObject("message")
-                )
+                ))
             })
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -117,14 +117,14 @@ class MimoAsrClient(
                             val delta = extractStreamDelta(json)
                             if (delta.isNotBlank()) {
                                 pending.append(delta)
-                                trySend(delta)
+                                trySend(cleanTranscript(delta))
                             }
                         }
                         // Some compatible servers ignore stream=true and return one JSON object.
                         if (pending.isEmpty() && plainResponse.isNotBlank()) {
-                            trySend(extractMessageContent(
+                            trySend(cleanTranscript(extractMessageContent(
                                 JSONObject(plainResponse.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
-                            ))
+                            )))
                         }
                     }.onFailure(::close)
                     close()
@@ -152,13 +152,13 @@ class MimoAsrClient(
         }
 
     private fun extractMessageContent(message: JSONObject): String {
-        val direct = message.optString("content").trim()
+        val direct = message.optText("content")
         if (direct.isNotEmpty()) return direct
         val content = message.optJSONArray("content") ?: return ""
         return buildString {
             repeat(content.length()) { index ->
                 val item = content.optJSONObject(index) ?: return@repeat
-                val text = item.optString("text").ifBlank { item.optString("content") }
+                val text = item.optText("text").ifBlank { item.optText("content") }
                 if (text.isNotBlank()) append(text)
             }
         }.trim()
@@ -169,6 +169,17 @@ class MimoAsrClient(
         val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: return ""
         return extractMessageContent(delta)
     }
+
+    /** JSONObject.optString renders JSON null as the literal text "null". */
+    private fun JSONObject.optText(name: String): String = when (val value = opt(name)) {
+        null, JSONObject.NULL -> ""
+        is String -> value.trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+        else -> value.toString().trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+    }
+
+    private fun cleanTranscript(value: String): String = value
+        .replace(Regex("""(?i)\s*\bnull\b\s*$"""), "")
+        .trim()
 
     private fun wav(pcm: ByteArray): ByteArray {
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)

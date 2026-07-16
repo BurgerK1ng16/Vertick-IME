@@ -77,6 +77,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var pinyinStatus = ""
     private var pinyinNineKey = false
     private var symbolsUseEnglish = false
+    private var nineKeySymbols: List<String> = emptyList()
+    private var nineKeySymbolScrollY = 0f
+    private var nineKeySymbolMaxScroll = 0f
+    private var nineKeySymbolViewport: RectF? = null
+    private var nineKeySymbolDragging = false
+    private var nineKeySymbolDragStart = 0f
     private var candidateScrollX = 0f
     private var candidateMaxScroll = 0f
     private var candidateDragging = false
@@ -200,7 +206,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         modeOptions: List<KeyboardMode> = this.availableModes,
         clipboardEntries: List<ClipboardEntry> = this.clipboardEntries,
         pinyinNineKey: Boolean = this.pinyinNineKey,
-        symbolsUseEnglish: Boolean = this.symbolsUseEnglish
+        symbolsUseEnglish: Boolean = this.symbolsUseEnglish,
+        nineKeySymbols: List<String> = this.nineKeySymbols
     ) {
         val normalizedModes = modeOptions.distinct().filter { it != KeyboardMode.SYMBOLS }
             .ifEmpty { listOf(KeyboardMode.PINYIN) }
@@ -250,6 +257,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.pinyinStatus = pinyinStatus
         this.pinyinNineKey = pinyinNineKey
         this.symbolsUseEnglish = symbolsUseEnglish
+        this.nineKeySymbols = nineKeySymbols
         this.keyboardTheme = keyboardTheme
         this.sensitive = sensitive
         this.hapticStrength = hapticStrength
@@ -358,6 +366,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         candidateStrip = null
         answerViewport = null
         clipboardViewport = null
+        nineKeySymbolViewport = null
         clipboardRows = emptyList()
         if (hasComposition()) {
             val pinyin = mode == KeyboardMode.PINYIN
@@ -700,35 +709,46 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val gap = dp(7)
         val edge = dp(5)
         val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
-        val keyWidth = (width - edge * 2 - gap * 2) / 3f
+        val sidebarWidth = (width * .17f).coerceAtLeast(dp(54))
+        val sidebar = RectF(edge, top, edge + sidebarWidth, top + keyHeight * 3 + gap * 2)
+        val mainLeft = sidebar.right + gap
+        val actionWidth = (width * .17f).coerceAtLeast(dp(54))
+        val mainRight = width - edge - actionWidth - gap
+        val keyWidth = (mainRight - mainLeft - gap * 2) / 3f
         val rows = listOf(
             listOf("ABC" to "2", "DEF" to "3", "GHI" to "4"),
             listOf("JKL" to "5", "MNO" to "6", "PQRS" to "7"),
-            listOf("TUV" to "8", "WXYZ" to "9")
+            listOf("TUV" to "8", "WXYZ" to "9", "'" to "'")
         )
         rows.forEachIndexed { rowIndex, row ->
             val y = top + (keyHeight + gap) * rowIndex
             row.forEachIndexed { column, (letters, code) ->
-                val x = edge + column * (keyWidth + gap)
+                val x = mainLeft + column * (keyWidth + gap)
                 val box = RectF(x, y, x + keyWidth, y + keyHeight)
                 key(canvas, box)
-                label(canvas, letters, box.centerX(), box.centerY() - dp(3), 17f, white, Paint.Align.CENTER, true)
-                label(canvas, code, box.centerX(), box.centerY() + dp(17), 12f, muted, Paint.Align.CENTER)
+                if (letters == "'") {
+                    label(canvas, letters, box.centerX(), box.centerY() + dp(7), 25f, white, Paint.Align.CENTER, true)
+                } else {
+                    label(canvas, letters, box.centerX(), box.centerY() - dp(3), 17f, white, Paint.Align.CENTER, true)
+                    label(canvas, code, box.centerX(), box.centerY() + dp(17), 12f, muted, Paint.Align.CENTER)
+                }
                 target(box, keySound = true) { actions.typePinyin(code) }
             }
-            if (rowIndex == 2) {
-                val x = edge + 2 * (keyWidth + gap)
-                val back = RectF(x, y, x + keyWidth, y + keyHeight)
-                key(canvas, back)
-                lucide(canvas, R.drawable.ic_lucide_delete, back.centerX(), back.centerY(), dp(23), white)
-                target(back, repeat = true, keySound = true) { actions.backspace() }
-            }
         }
+        drawNineKeySymbolSidebar(canvas, sidebar)
+        val actionLeft = mainRight + gap
+        val delete = RectF(actionLeft, top, width - edge, top + keyHeight)
+        key(canvas, delete)
+        lucide(canvas, R.drawable.ic_lucide_delete, delete.centerX(), delete.centerY(), dp(23), white)
+        target(delete, repeat = true, keySound = true) { actions.backspace() }
+        val newline = RectF(actionLeft, top + keyHeight + gap, width - edge, top + keyHeight * 3 + gap * 2)
+        key(canvas, newline)
+        centeredLabel(canvas, "换行", newline, 16f, white, Paint.Align.CENTER)
+        target(newline, keySound = true) { actions.newline() }
         val y = top + (keyHeight + gap) * 3
-        val controlWidth = keyWidth * .82f
-        val symbols = RectF(edge, y, edge + controlWidth, y + keyHeight)
-        val enter = RectF(width - edge - controlWidth, y, width - edge, y + keyHeight)
-        val space = RectF(symbols.right + gap, y, enter.left - gap, y + keyHeight)
+        val symbols = RectF(edge, y, edge + sidebarWidth, y + keyHeight)
+        val enter = RectF(actionLeft, y, width - edge, y + keyHeight)
+        val space = RectF(mainLeft, y, mainRight, y + keyHeight)
         key(canvas, symbols)
         key(canvas, space)
         rounded(canvas, enter, dp(10), white)
@@ -740,6 +760,25 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             if (pinyinCandidates.isNotEmpty()) actions.chooseCandidate(pinyinCandidates.first())
         }
         target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
+    }
+
+    private fun drawNineKeySymbolSidebar(canvas: Canvas, viewport: RectF) {
+        nineKeySymbolViewport = RectF(viewport)
+        val itemHeight = dp(48)
+        val contentHeight = (nineKeySymbols.size * itemHeight).coerceAtLeast(viewport.height())
+        nineKeySymbolMaxScroll = (contentHeight - viewport.height()).coerceAtLeast(0f)
+        nineKeySymbolScrollY = nineKeySymbolScrollY.coerceIn(0f, nineKeySymbolMaxScroll)
+        canvas.save()
+        canvas.clipRect(viewport)
+        nineKeySymbols.forEachIndexed { index, symbol ->
+            val y = viewport.top + index * itemHeight - nineKeySymbolScrollY
+            val box = RectF(viewport.left, y, viewport.right, y + itemHeight - dp(1))
+            key(canvas, box)
+            fittedLabel(canvas, symbol, box, 21f, white, false)
+            val targetBox = RectF(box).apply { intersect(viewport) }
+            target(targetBox, keySound = true) { actions.typeEnglish(symbol) }
+        }
+        canvas.restore()
     }
 
     private fun candidates(
@@ -1192,6 +1231,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     candidateVelocityTracker?.recycle()
                     candidateVelocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
                 }
+                nineKeySymbolDragging = !candidateDragging && nineKeySymbolViewport?.contains(event.x, event.y) == true
+                if (nineKeySymbolDragging) {
+                    nineKeySymbolDragStart = nineKeySymbolScrollY
+                }
                 answerDragging = !candidateDragging && answerViewport?.contains(event.x, event.y) == true
                 candidateDragStartScroll = candidateScrollX
                 answerDragStartScroll = answerScrollY
@@ -1236,6 +1279,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                             (-dx).coerceIn(0f, dp(68))
                         }
                     }
+                    invalidate()
+                } else if (nineKeySymbolDragging) {
+                    nineKeySymbolScrollY = (nineKeySymbolDragStart - (event.y - touchDownY))
+                        .coerceIn(0f, nineKeySymbolMaxScroll)
+                    pressedBox = null
                     invalidate()
                 } else if (candidateDragging) {
                     candidateVelocityTracker?.addMovement(event)
@@ -1312,11 +1360,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     performClick()
                     return true
                 }
+                val wasNineKeySymbolDragging = nineKeySymbolDragging && kotlin.math.abs(event.y - touchDownY) > dp(4)
                 val wasDragging = candidateDragging && kotlin.math.abs(event.x - touchDownX) > dp(4)
                 val wasAnswerDragging = answerDragging && kotlin.math.abs(event.y - touchDownY) > dp(4)
+                nineKeySymbolDragging = false
                 candidateDragging = false
                 answerDragging = false
-                if (wasDragging || wasAnswerDragging) {
+                if (wasNineKeySymbolDragging || wasDragging || wasAnswerDragging) {
                     candidateVelocityTracker?.addMovement(event)
                     candidateVelocityTracker?.computeCurrentVelocity(1_000)
                     val velocity = (-(candidateVelocityTracker?.xVelocity ?: 0f)).toInt()
@@ -1371,6 +1421,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 candidateVelocityTracker?.recycle()
                 candidateVelocityTracker = null
                 answerDragging = false
+                nineKeySymbolDragging = false
                 clipboardTracking = false
                 clipboardTouchedEntry = null
                 clipboardSwipeOffset = 0f

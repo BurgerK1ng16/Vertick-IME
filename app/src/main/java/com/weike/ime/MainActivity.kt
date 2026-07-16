@@ -215,6 +215,7 @@ class MainActivity : AppCompatActivity() {
     private var typingDictionaryList: LinearLayout? = null
     private var overridesList: LinearLayout? = null
     private var keyboardModesList: LinearLayout? = null
+    private var nineKeySymbolsList: LinearLayout? = null
     private var microphoneStatus: TextView? = null
     private var latestStats = UsageStats()
     private var latestHistory: List<InputHistory> = emptyList()
@@ -222,6 +223,7 @@ class MainActivity : AppCompatActivity() {
     private var latestTypingDictionary: List<TypingDictionaryEntry> = emptyList()
     private var latestOverrides: Map<String, WritingStyle> = emptyMap()
     private var latestKeyboardModes: List<KeyboardModePreference> = emptyList()
+    private var latestNineKeySymbols: List<String> = emptyList()
     private var dictionaryTab = 0
     private var dragHighlight: View? = null
     private var dragSource: View? = null
@@ -711,6 +713,10 @@ class MainActivity : AppCompatActivity() {
                 layoutControl.setSelected(layouts.indexOf(container.settings.chineseKeyboardLayout()).coerceAtLeast(0))
             }
         })
+        addView(section("九宫格符号"))
+        nineKeySymbolsList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        addView(nineKeySymbolsList)
+        renderNineKeySymbolControls(latestNineKeySymbols)
         addView(section("剪贴板"))
         addView(card().apply {
             val clipboardControl = SegmentedControl(this@MainActivity, listOf("关闭", "开启"), 0) { index ->
@@ -828,6 +834,12 @@ class MainActivity : AppCompatActivity() {
             container.settings.keyboardModes.collectLatest {
                 latestKeyboardModes = it
                 renderKeyboardModeControls(it)
+            }
+        }
+        lifecycleScope.launch {
+            container.settings.nineKeySymbols.collectLatest {
+                latestNineKeySymbols = it
+                renderNineKeySymbolControls(it)
             }
         }
     }
@@ -964,6 +976,93 @@ class MainActivity : AppCompatActivity() {
                 addView(row)
             })
         }
+    }
+
+    private fun renderNineKeySymbolControls(symbols: List<String>) {
+        val host = nineKeySymbolsList ?: return
+        host.removeAllViews()
+        host.setOnDragListener { _, event ->
+            fun targetIndex(): Int {
+                for (index in symbols.indices) {
+                    val child = host.getChildAt(index) ?: continue
+                    if (event.y < child.top + child.height / 2f) return index
+                }
+                return symbols.size
+            }
+            when (event.action) {
+                DragEvent.ACTION_DRAG_STARTED -> true
+                DragEvent.ACTION_DRAG_ENTERED, DragEvent.ACTION_DRAG_LOCATION -> {
+                    setDragHighlight(host.getChildAt(targetIndex().coerceIn(0, (symbols.size - 1).coerceAtLeast(0))))
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> { setDragHighlight(null); true }
+                DragEvent.ACTION_DROP -> {
+                    val moving = event.localState as? String ?: return@setOnDragListener false
+                    val next = symbols.toMutableList()
+                    val from = next.indexOf(moving)
+                    if (from < 0) return@setOnDragListener false
+                    next.removeAt(from)
+                    next.add(targetIndex().coerceIn(0, next.size), moving)
+                    setDragHighlight(null)
+                    lifecycleScope.launch { container.settings.saveNineKeySymbols(next) }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    dragSource?.animate()?.alpha(1f)?.scaleX(1f)?.scaleY(1f)?.setDuration(140)?.start()
+                    dragSource = null
+                    setDragHighlight(null)
+                    true
+                }
+                else -> true
+            }
+        }
+        symbols.forEach { symbol ->
+            host.addView(card(top = 5).apply {
+                val row = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL }
+                row.addView(TextView(this@MainActivity).apply {
+                    text = symbol
+                    textSize = 22f
+                    gravity = Gravity.CENTER_VERTICAL
+                    setTextColor(getColor(R.color.weike_text))
+                    setOnClickListener { showNineKeySymbolEditor(symbol) }
+                }, LinearLayout.LayoutParams(0, dp(50), 1f))
+                row.addView(ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_lucide_grip_vertical)
+                    setColorFilter(getColor(R.color.weike_muted))
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    setOnLongClickListener {
+                        dragSource = this
+                        animate().alpha(0.55f).scaleX(0.92f).scaleY(0.92f).setDuration(120).start()
+                        startDragAndDrop(ClipData.newPlainText("nine_key_symbol", symbol), View.DragShadowBuilder(this), symbol, 0)
+                        true
+                    }
+                }, LinearLayout.LayoutParams(dp(44), dp(50)))
+                addView(row)
+            })
+        }
+        host.addView(primaryButton("添加符号") { showNineKeySymbolEditor() })
+    }
+
+    private fun showNineKeySymbolEditor(existing: String? = null) {
+        val input = field("输入一个符号").apply { setText(existing.orEmpty()); setSelection(text.length) }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (existing == null) "添加九宫格符号" else "编辑九宫格符号")
+            .setView(input)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存") { _, _ ->
+                val value = input.text.toString().trim()
+                if (value.isNotEmpty()) lifecycleScope.launch {
+                    val next = latestNineKeySymbols.toMutableList()
+                    if (existing != null) next[next.indexOf(existing)] = value else next += value
+                    container.settings.saveNineKeySymbols(next)
+                }
+            }
+        if (existing != null) dialog.setNeutralButton("删除") { _, _ ->
+            lifecycleScope.launch {
+                    container.settings.saveNineKeySymbols(latestNineKeySymbols.filterNot { it == existing })
+            }
+        }
+        dialog.show()
     }
 
     private fun setDragHighlight(target: View?) {

@@ -27,6 +27,7 @@ class AppSettingsRepository(private val context: Context) {
     private val historyRetentionKey = stringPreferencesKey("history_retention")
     private val keyboardModesKey = stringPreferencesKey("keyboard_modes")
     private val chineseKeyboardLayoutKey = stringPreferencesKey("chinese_keyboard_layout")
+    private val nineKeySymbolsKey = stringPreferencesKey("nine_key_symbols")
     // Legacy plaintext keys are read once, migrated into SecureSecretStore, then deleted.
     private val asrUrlKey = stringPreferencesKey("asr_api_url")
     private val asrApiKeyKey = stringPreferencesKey("asr_api_key")
@@ -65,6 +66,9 @@ class AppSettingsRepository(private val context: Context) {
     val chineseKeyboardLayout = context.settingsDataStore.data.map { prefs ->
         runCatching { ChineseKeyboardLayout.valueOf(prefs[chineseKeyboardLayoutKey].orEmpty()) }
             .getOrDefault(ChineseKeyboardLayout.FULL)
+    }
+    val nineKeySymbols = context.settingsDataStore.data.map { prefs ->
+        decodeNineKeySymbols(prefs[nineKeySymbolsKey].orEmpty())
     }
     val cloudApiSettings = flow {
         migrateCloudSecrets()
@@ -140,6 +144,14 @@ class AppSettingsRepository(private val context: Context) {
 
     suspend fun saveChineseKeyboardLayout(layout: ChineseKeyboardLayout) {
         context.settingsDataStore.edit { prefs -> prefs[chineseKeyboardLayoutKey] = layout.name }
+    }
+
+    suspend fun nineKeySymbols(): List<String> = nineKeySymbols.first()
+
+    suspend fun saveNineKeySymbols(symbols: List<String>) {
+        val normalized = symbols.map(String::trim).filter(String::isNotBlank).distinct().take(MAX_NINE_KEY_SYMBOLS)
+            .ifEmpty { DEFAULT_NINE_KEY_SYMBOLS }
+        context.settingsDataStore.edit { prefs -> prefs[nineKeySymbolsKey] = normalized.joinToString("\n") }
     }
 
     suspend fun clipboardHistoryEnabled(): Boolean = clipboardHistoryEnabled.first()
@@ -233,10 +245,20 @@ class AppSettingsRepository(private val context: Context) {
         return parsed.ifEmpty { DEFAULT_KEYBOARD_MODES }
     }
 
+    private fun decodeNineKeySymbols(value: String): List<String> = value.lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .distinct()
+        .take(MAX_NINE_KEY_SYMBOLS)
+        .toList()
+        .ifEmpty { DEFAULT_NINE_KEY_SYMBOLS }
+
     companion object {
         private const val SECURE_ASR_KEY = "asr_api_key"
         private const val SECURE_TEXT_KEY = "text_api_key"
         const val DEFAULT_KEYBOARD_SOUND_VOLUME = .45f
+        const val MAX_NINE_KEY_SYMBOLS = 16
+        val DEFAULT_NINE_KEY_SYMBOLS = listOf("，", "。", "？", "！", "…", "：", "、", "～")
         val DEFAULT_KEYBOARD_MODES = listOf(
             KeyboardModePreference.VOICE,
             KeyboardModePreference.TEXT

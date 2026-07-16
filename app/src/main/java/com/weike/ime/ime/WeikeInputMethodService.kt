@@ -73,12 +73,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var keyboardThemePreference = KeyboardTheme.DARK
     private var expressionOptimization = false
     private var chineseKeyboardLayout = ChineseKeyboardLayout.FULL
+    private var nineKeySymbols = AppSettingsRepository.DEFAULT_NINE_KEY_SYMBOLS
     private var pinyinBuffer = ""
     private var pinyinCandidates: List<PinyinCandidate> = emptyList()
     private val pinyinMutex = Mutex()
     private val languageEngineMutex = Mutex()
     private val pinyinOperations = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private var pinyinReady = false
+    // Keeps text input usable while the full Rime-Ice table is compiling for the first time.
+    private var fallbackPinyinComposition = false
     private var engineLoadJob: Job? = null
     private var engineIdleReleaseJob: Job? = null
     private var rimeTermStageJob: Job? = null
@@ -172,6 +175,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             }
         }
         serviceScope.launch {
+            container.settings.nineKeySymbols.collect { symbols ->
+                nineKeySymbols = symbols
+                render()
+            }
+        }
+        serviceScope.launch {
             container.settings.cloudApiSettings.collect { settings ->
                 cloudApiSettings = settings
             }
@@ -240,6 +249,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         sensitiveField = isSensitive(attribute)
         pinyinBuffer = ""
         pinyinCandidates = emptyList()
+        fallbackPinyinComposition = false
         englishBuffer = ""
         englishCandidates = emptyList()
         enqueuePinyin { if (pinyinReady) pinyinDecoder.clear() }
@@ -342,7 +352,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 }
                     .onFailure { Log.e(TAG, "Unable to prepare Rime", it) }
                     .getOrDefault(false)
-                if (pinyinReady) pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
+                if (pinyinReady) {
+                    pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
+                    // Never replay a first-run fallback into a newly initialized native session.
+                    if (!fallbackPinyinComposition) applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
+                }
                 if (pinyinReady && RimePinyinDecoder.consumeClearRequest(this@WeikeInputMethodService)) {
                     pinyinReady = pinyinDecoder.clearUserLearning()
                 }
@@ -928,8 +942,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun typePinyin(value: String) {
-        if (!pinyinReady) {
+        if (!pinyinReady || fallbackPinyinComposition) {
             requestPinyinEngine()
+            fallbackPinyinComposition = true
+            pinyinBuffer += value.lowercase()
+            pinyinCandidates = fallbackPinyinCandidates(pinyinBuffer)
+            updateComposingText(pinyinBuffer)
+            render()
             return
         }
         engineIdleReleaseJob?.cancel()
@@ -946,7 +965,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun chooseCandidate(candidate: PinyinCandidate) {
-        if (!pinyinReady) return
+        if (!pinyinReady || fallbackPinyinComposition) {
+            if (candidate.directCommit) {
+                fallbackPinyinComposition = false
+                commitFallbackPinyin(candidate.text)
+            }
+            return
+        }
         enqueuePinyin {
             if (candidate.directCommit) commitDirectPinyin(candidate.text)
             else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
@@ -977,6 +1002,14 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun backspace() {
         if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
+            if (fallbackPinyinComposition) {
+                pinyinBuffer = pinyinBuffer.dropLast(1)
+                pinyinCandidates = fallbackPinyinCandidates(pinyinBuffer)
+                if (pinyinBuffer.isEmpty()) fallbackPinyinComposition = false
+                updateComposingText(pinyinBuffer)
+                render()
+                return
+            }
             pendingPinyinMutations += 1
             enqueuePinyin {
                 try {
@@ -1047,7 +1080,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 englishBuffer, englishCandidates, rawTranscript, sensitiveField, hapticStrength,
                 pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
                 clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
-                modeBeforeSymbols == KeyboardMode.ENGLISH
+                modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols
             )
         }
     }
@@ -1105,6 +1138,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitCurrentPinyin() {
+        if (fallbackPinyinComposition) {
+            val fallback = pinyinCandidates.firstOrNull()?.text ?: pinyinBuffer
+            fallbackPinyinComposition = false
+            commitFallbackPinyin(fallback)
+            return
+        }
         val candidate = pinyinCandidates.firstOrNull() ?: return
         if (candidate.directCommit) commitDirectPinyin(candidate.text)
         else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
@@ -1112,7 +1151,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     private suspend fun commitRawPinyin() {
         val raw = pinyinDecoder.currentState().preedit.ifBlank { pinyinBuffer }
-        pinyinDecoder.clear()
+        if (pinyinReady && !fallbackPinyinComposition) pinyinDecoder.clear()
+        fallbackPinyinComposition = false
         pinyinBuffer = ""
         pinyinCandidates = emptyList()
         updateComposingText("")
@@ -1121,12 +1161,31 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitDirectPinyin(text: String) {
-        pinyinDecoder.clear()
+        if (pinyinReady && !fallbackPinyinComposition) pinyinDecoder.clear()
+        fallbackPinyinComposition = false
         pinyinBuffer = ""
         pinyinCandidates = emptyList()
         updateComposingText("")
         currentInputConnection?.commitText(text, 1)
         render()
+    }
+
+    private fun commitFallbackPinyin(text: String) {
+        pinyinBuffer = ""
+        pinyinCandidates = emptyList()
+        updateComposingText("")
+        currentInputConnection?.commitText(text, 1)
+        render()
+    }
+
+    private fun fallbackPinyinCandidates(preedit: String): List<PinyinCandidate> {
+        if (preedit.isBlank()) return emptyList()
+        // Keep the raw sequence available as an explicit candidate. Custom terms are
+        // still merged in front, so a freshly added word is immediately useful.
+        return mergeCustomPinyinCandidates(
+            preedit,
+            listOf(PinyinCandidate(preedit, score = -1.0, index = -1, directCommit = true))
+        )
     }
 
     private fun mergeCustomPinyinCandidates(

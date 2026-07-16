@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.1 - 2026-07-16
+
+### English
+
+- First-run Pinyin is now usable immediately while the complete Rime-Ice dictionary is verified in the background. Typing, deletion, custom-word matching, and explicit raw-Pinyin commit remain available instead of blocking on “Preparing dictionary”.
+- Redesigned the nine-key Chinese layout with a vertically scrollable punctuation sidebar, three-column keypad, dedicated delete key, two-cell newline area, full-width spacebar, and the existing `123` symbol page.
+- Added Settings controls to add, edit, delete, and drag-sort nine-key sidebar punctuation. The default set is `， 。 ？ ！ … ： 、 ～`.
+- Fixed MiMo ASR JSON `null` values and trailing `null` artifacts appearing in dictation output.
+
+### 简体中文
+
+- 首次使用时，完整 Rime-Ice 词典仍在后台校验和编译，但拼音键盘已可立即输入、删除、命中自定义词并提交原始拼音，不再被“词典准备中”阻塞。
+- 重做九宫格中文布局：左侧可上下滑动的符号栏、三列九键、独立删除键、两格高换行区、三格空格键和原有 `123` 数字符号页。
+- 设置页新增九宫格侧边符号管理，可添加、编辑、删除和拖动排序；默认符号为 `， 。 ？ ！ … ： 、 ～`。
+- 修复 MiMo ASR 返回 JSON `null` 或末尾 `null` 被写入听写结果的问题。
+
 ## 1.2.0 - 2026-07-16
 
 ### English
