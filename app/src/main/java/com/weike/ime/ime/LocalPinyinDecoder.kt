@@ -24,6 +24,7 @@ class LocalPinyinDecoder(context: Context) {
     private val readingByCharacter = AtomicReference<Map<Char, String>>(FALLBACK_READINGS)
     private val index = AtomicReference<PrebuiltPinyinIndex?>(null)
     private val lookupCache = ConcurrentHashMap<String, List<RankedText>>()
+    private val prefixCodeCache = ConcurrentHashMap<String, List<RankedCode>>()
 
     @Volatile var isReady: Boolean = true
         private set
@@ -84,8 +85,13 @@ class LocalPinyinDecoder(context: Context) {
 
     suspend fun selectChineseKeyboardLayout(value: ChineseKeyboardLayout): Boolean {
         synchronized(lock) {
-            layout = value
-            composition = ""
+            // Re-selecting the active layout happens after a configuration change
+            // and must not destroy a live composition. Only a user-initiated
+            // layout switch clears the decoder state.
+            if (layout != value) {
+                layout = value
+                composition = ""
+            }
         }
         return true
     }
@@ -117,6 +123,7 @@ class LocalPinyinDecoder(context: Context) {
 
     suspend fun shutdown() {
         lookupCache.clear()
+        prefixCodeCache.clear()
     }
 
     fun pinyinCodeForTerm(term: String, hint: String): String {
@@ -154,7 +161,13 @@ class LocalPinyinDecoder(context: Context) {
             .forEach { add(it.text, it.weight) }
 
         CORE_PHRASES[query].orEmpty().forEach { add(it.text, it.weight) }
+        fuzzyCorePhraseCandidates(query).forEach { add(it.text, it.weight) }
         fullCandidates(query).forEach { add(it.text, it.weight) }
+        mixedInitialCandidates(query).forEach { add(it.text, it.weight) }
+        correctedFullCandidates(query).forEach { add(it.text, it.weight) }
+        // Exact keys are still first, but never make a single mistyped letter a
+        // dead end. This is a bounded candidate-code search, not a full scan.
+        fuzzyCandidates(query).forEach { add(it.text, it.weight) }
         // Initials are a separate index. A short form such as wsm must match
         // wei shen me (为什么) rather than being treated as an invalid syllable.
         buildInitialIndex(CORE_PHRASES)[query].orEmpty().forEach { add(it.text, it.weight) }
@@ -228,6 +241,214 @@ class LocalPinyinDecoder(context: Context) {
         }
         return results.sortedByDescending { it.weight }.distinctBy { it.text }.take(MAX_CANDIDATES)
     }
+
+    internal fun fuzzyCandidatesForTest(query: String): List<String> = synchronized(lock) {
+        fuzzyCandidates(normalizedCode(query)).map { it.text }
+    }
+
+    private fun fuzzyCorePhraseCandidates(query: String): List<RankedText> {
+        if (query.length < MIN_FUZZY_QUERY_LENGTH) return emptyList()
+        val maximumDistance = when {
+            query.length >= 9 -> 2
+            query.length >= 5 -> 1
+            else -> 0
+        }
+        return (CORE_PHRASES + COMMON_SPOKEN_PHRASES).entries.flatMap { (code, entries) ->
+            val syllables = decodeCode(code, CORE_SYLLABLES)
+            val distance = PinyinFuzzyMatcher.bestDistance(query, syllables, maximumDistance)
+                ?: return@flatMap emptyList()
+            entries.map { entry ->
+                RankedText(entry.text, entry.weight + CORE_FUZZY_SCORE_BONUS - distance * CORE_FUZZY_DISTANCE_PENALTY)
+            }
+        }.sortedByDescending { it.weight }
+            .take(MAX_CANDIDATES)
+    }
+
+    /** Supports mixed forms such as full `zai` followed by initial `g` + `m`. */
+    private fun mixedInitialCandidates(query: String): List<RankedText> {
+        if (query.length < MIN_FUZZY_QUERY_LENGTH || query.all(Char::isDigit)) return emptyList()
+        val abbreviations = abbreviatedForms(query)
+        if (abbreviations.isEmpty()) return emptyList()
+        return abbreviations.flatMap { abbreviation ->
+            initialCandidates(abbreviation).map { candidate ->
+                RankedText(candidate.text, candidate.weight + MIXED_INITIAL_SCORE_BONUS)
+            }
+        }.sortedByDescending { it.weight }
+            .distinctBy { it.text }
+            .take(MAX_CANDIDATES)
+    }
+
+    /**
+     * Corrects one key-level error before querying the exact index. This avoids
+     * scanning the full dictionary and keeps each keystroke bounded. It covers
+     * substitution (including m/n), an accidental extra letter, and one omitted
+     * letter. Exact typed codes always rank above this recovery path.
+     */
+    private fun correctedFullCandidates(query: String): List<RankedText> {
+        if (query.length !in MIN_CORRECTION_QUERY_LENGTH..MAX_CORRECTION_QUERY_LENGTH) return emptyList()
+        val results = ArrayList<RankedText>(MAX_CANDIDATES)
+        val seen = HashSet<String>()
+        oneEditCodes(query).forEach { corrected ->
+            uncachedFullCandidates(corrected).forEach { candidate ->
+                if (seen.add(candidate.text)) {
+                    results += RankedText(candidate.text, candidate.weight + CORRECTION_SCORE_BONUS)
+                }
+            }
+        }
+        return results.sortedByDescending { it.weight }.take(MAX_CANDIDATES)
+    }
+
+    internal fun abbreviatedFormsForTest(query: String): Set<String> = abbreviatedForms(query)
+
+    private fun abbreviatedForms(query: String): Set<String> {
+        val results = LinkedHashSet<String>()
+        fun walk(offset: Int, output: StringBuilder) {
+            if (results.size >= MAX_MIXED_INITIAL_FORMS) return
+            if (offset == query.length) {
+                if (output.length >= 2 && output.length < query.length) results += output.toString()
+                return
+            }
+            // A single letter may be an abbreviation for the current syllable.
+            output.append(query[offset])
+            walk(offset + 1, output)
+            output.setLength(output.length - 1)
+            val end = minOf(query.length, offset + MAX_SYLLABLE_LENGTH)
+            for (cursor in end downTo offset + 2) {
+                val syllable = query.substring(offset, cursor)
+                if (syllable !in CORE_SYLLABLES) continue
+                output.append(syllable[0])
+                walk(cursor, output)
+                output.setLength(output.length - 1)
+            }
+        }
+        walk(0, StringBuilder())
+        return results
+    }
+
+    private fun oneEditCodes(query: String): List<String> {
+        val values = ArrayList<String>(MAX_CORRECTION_CODES)
+        val emitted = HashSet<String>()
+        fun add(value: String) {
+            if (values.size < MAX_CORRECTION_CODES && value != query && value.isNotBlank() && emitted.add(value)) {
+                values += value
+            }
+        }
+        // Deleting a character corrects an accidental extra key.
+        query.indices.forEach { index -> add(query.removeRange(index, index + 1)) }
+        // Substitution is limited to adjacent keys plus the common m/n swap.
+        query.forEachIndexed { index, character ->
+            keyboardNeighbors(character).forEach { replacement ->
+                add(query.substring(0, index) + replacement + query.substring(index + 1))
+            }
+        }
+        // Insertions repair an omitted nearby key without generating all 26^n forms.
+        for (index in 0..query.length) {
+            insertionNeighbors(query, index).forEach { inserted ->
+                add(query.substring(0, index) + inserted + query.substring(index))
+            }
+        }
+        return values
+    }
+
+    private fun keyboardNeighbors(character: Char): CharArray = when (character) {
+        'a' -> charArrayOf('s', 'q', 'z')
+        'b' -> charArrayOf('v', 'g', 'h', 'n')
+        'c' -> charArrayOf('x', 'd', 'f', 'v')
+        'd' -> charArrayOf('s', 'e', 'r', 'f', 'c', 'x')
+        'e' -> charArrayOf('w', 'r', 'd')
+        'f' -> charArrayOf('d', 'r', 't', 'g', 'v', 'c')
+        'g' -> charArrayOf('f', 't', 'y', 'h', 'b', 'v')
+        'h' -> charArrayOf('g', 'y', 'u', 'j', 'n', 'b')
+        'i' -> charArrayOf('u', 'o', 'k')
+        'j' -> charArrayOf('h', 'u', 'i', 'k', 'm', 'n')
+        'k' -> charArrayOf('j', 'i', 'o', 'l', 'm')
+        'l' -> charArrayOf('k', 'o', 'p')
+        'm' -> charArrayOf('n', 'j', 'k')
+        'n' -> charArrayOf('b', 'h', 'j', 'm')
+        'o' -> charArrayOf('i', 'p', 'l', 'k')
+        'p' -> charArrayOf('o', 'l')
+        'q' -> charArrayOf('w', 'a')
+        'r' -> charArrayOf('e', 't', 'f', 'd')
+        's' -> charArrayOf('a', 'w', 'e', 'd', 'x', 'z')
+        't' -> charArrayOf('r', 'y', 'g', 'f')
+        'u' -> charArrayOf('y', 'i', 'j', 'h')
+        'v' -> charArrayOf('c', 'f', 'g', 'b')
+        'w' -> charArrayOf('q', 'e', 's', 'a')
+        'x' -> charArrayOf('z', 's', 'd', 'c')
+        'y' -> charArrayOf('t', 'u', 'h', 'g')
+        'z' -> charArrayOf('a', 's', 'x')
+        else -> charArrayOf()
+    }
+
+    private fun insertionNeighbors(query: String, index: Int): CharArray {
+        val left = query.getOrNull(index - 1)
+        val right = query.getOrNull(index)
+        return ((left?.let(::keyboardNeighbors) ?: charArrayOf()) +
+            (right?.let(::keyboardNeighbors) ?: charArrayOf()))
+            .distinct()
+            .take(MAX_INSERTION_NEIGHBORS)
+            .toCharArray()
+    }
+
+    private fun fuzzyCandidates(query: String): List<RankedText> {
+        if (query.length < MIN_FUZZY_QUERY_LENGTH || query.all(Char::isDigit)) return emptyList()
+        val maximumDistance = when {
+            query.length >= 9 -> 2
+            query.length >= 5 -> 1
+            else -> 0
+        }
+        val results = ArrayList<RankedText>(MAX_CANDIDATES)
+        val seen = HashSet<String>()
+        candidateCodesFor(query).forEach { entry ->
+            val score = when {
+                entry.code.startsWith(query) -> COMPLETION_SCORE_BONUS - (entry.code.length - query.length) * 1_000
+                else -> {
+                    val syllables = decodeCode(entry.code, CORE_SYLLABLES)
+                    val distance = PinyinFuzzyMatcher.bestDistance(query, syllables, maximumDistance)
+                        ?: return@forEach
+                    FUZZY_SCORE_BONUS - distance * FUZZY_DISTANCE_PENALTY -
+                        kotlin.math.abs(entry.code.length - query.length) * 250
+                }
+            }
+            entry.candidates.forEach { candidate ->
+                if (seen.add(candidate.text)) results += RankedText(candidate.text, candidate.weight + score)
+            }
+        }
+        return results.sortedByDescending { it.weight }.take(MAX_CANDIDATES)
+    }
+
+    private fun candidateCodesFor(query: String): List<RankedCode> {
+        val cacheKey = "p:$query"
+        if (prefixCodeCache.size >= MAX_PREFIX_CACHE_ENTRIES) prefixCodeCache.clear()
+        return prefixCodeCache.getOrPut(cacheKey) {
+            val anchors = linkedSetOf<String>()
+            // The whole query is the normal completion path. Removing a few tail
+            // characters covers an error in the last syllable; the first complete
+            // syllable keeps longer inputs recoverable after an earlier typo.
+            for (trim in 0..MAX_PREFIX_BACKTRACK) {
+                query.dropLast(trim).takeIf { it.length >= MIN_PREFIX_LENGTH }?.let(anchors::add)
+            }
+            longestLeadingSyllable(query)?.let(anchors::add)
+            val unique = LinkedHashMap<String, RankedCode>()
+            anchors.sortedByDescending(String::length).forEach { anchor ->
+                fullPrefixCandidates(anchor, MAX_PREFIX_RECORDS_PER_ANCHOR).forEach { entry ->
+                    unique.putIfAbsent(entry.code, entry)
+                }
+            }
+            unique.values.take(MAX_FUZZY_CODE_RECORDS)
+        }
+    }
+
+    private fun longestLeadingSyllable(query: String): String? =
+        (minOf(query.length, MAX_SYLLABLE_LENGTH) downTo 1)
+            .asSequence()
+            .map { query.substring(0, it) }
+            .firstOrNull { it in CORE_SYLLABLES }
+
+    private fun fullPrefixCandidates(prefix: String, limit: Int): List<RankedCode> =
+        index.get()?.fullPrefix(prefix, limit).orEmpty().map { record ->
+            RankedCode(record.code, record.candidates.map { RankedText(it.text, it.weight) })
+        }
 
     private fun matchesCode(query: String, code: String): Boolean {
         if (query.isBlank() || code.isBlank()) return false
@@ -365,6 +586,9 @@ class LocalPinyinDecoder(context: Context) {
         index.get()?.full(code).orEmpty().map { RankedText(it.text, it.weight) }
     }
 
+    private fun uncachedFullCandidates(code: String): List<RankedText> =
+        index.get()?.full(code).orEmpty().map { RankedText(it.text, it.weight) }
+
     private fun initialCandidates(code: String): List<RankedText> = cached("i:$code") {
         index.get()?.initials(code).orEmpty().map { RankedText(it.text, it.weight) }
     }
@@ -420,11 +644,30 @@ class LocalPinyinDecoder(context: Context) {
 
     private data class IndexedTerm(val text: String, val hint: String, val weight: Int, val code: String = "")
     private data class RankedText(val text: String, val weight: Int)
+    private data class RankedCode(val code: String, val candidates: List<RankedText>)
     private data class SentenceBeam(val offset: Int, val text: String, val score: Double)
 
     companion object {
         const val DICTIONARY_VERSION = "Full offline Pinyin index (base + ext + Tencent + 8105)"
         private const val MAX_CANDIDATES = 18
+        private const val MIN_FUZZY_QUERY_LENGTH = 3
+        private const val MIN_CORRECTION_QUERY_LENGTH = 4
+        private const val MAX_CORRECTION_QUERY_LENGTH = 24
+        private const val MAX_CORRECTION_CODES = 96
+        private const val MAX_INSERTION_NEIGHBORS = 4
+        private const val MAX_MIXED_INITIAL_FORMS = 64
+        private const val MAX_PREFIX_CACHE_ENTRIES = 128
+        private const val MIN_PREFIX_LENGTH = 2
+        private const val MAX_PREFIX_BACKTRACK = 4
+        private const val MAX_PREFIX_RECORDS_PER_ANCHOR = 180
+        private const val MAX_FUZZY_CODE_RECORDS = 420
+        private const val COMPLETION_SCORE_BONUS = 1_600_000
+        private const val CORE_FUZZY_SCORE_BONUS = 2_000_000
+        private const val CORE_FUZZY_DISTANCE_PENALTY = 450_000
+        private const val MIXED_INITIAL_SCORE_BONUS = 1_050_000
+        private const val CORRECTION_SCORE_BONUS = 650_000
+        private const val FUZZY_SCORE_BONUS = 1_250_000
+        private const val FUZZY_DISTANCE_PENALTY = 350_000
         private const val MAX_SEGMENTATIONS = 6
         private const val MAX_SYLLABLE_LENGTH = 6
         private const val MAX_T9_DIGITS_PER_SYLLABLE = 6
@@ -466,6 +709,14 @@ class LocalPinyinDecoder(context: Context) {
             "duibuqi" to listOf("对不起"),
             "zhangenjie" to listOf("张恩捷")
         ).mapValues { (_, values) -> values.mapIndexed { index, text -> RankedText(text, 2_000_000 - index) } }
+        // A compact spoken-language model fills the gap between a source
+        // dictionary (which optimizes coverage) and the phrases people expect
+        // from an IME. Keep entries in code so they participate in fuzzy matching
+        // even if a source table later drops a colloquial spelling.
+        private val COMMON_SPOKEN_PHRASES: Map<String, List<RankedText>> = mapOf(
+            "zaiganma" to listOf("在干嘛", "在干吗"),
+            "zaiguomao" to listOf("在国贸")
+        ).mapValues { (_, values) -> values.mapIndexed { index, text -> RankedText(text, 1_900_000 - index) } }
         private val FALLBACK_READINGS = mapOf(
             '张' to "zhang", '恩' to "en", '捷' to "jie", '维' to "wei", '刻' to "ke",
             '你' to "ni", '好' to "hao", '我' to "wo", '们' to "men", '今' to "jin", '天' to "tian"

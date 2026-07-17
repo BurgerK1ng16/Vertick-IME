@@ -347,6 +347,14 @@ class MainActivity : AppCompatActivity() {
             addView(actionRow("切换输入法", "选择维刻输入法") {
                 getSystemService(InputMethodManager::class.java).showInputMethodPicker()
             })
+            addDivider(this)
+            addView(actionRow("录音权限", "允许语音听写与润色") {
+                requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+            })
+            addDivider(this)
+            addView(actionRow("横屏悬浮窗", "横屏时保持键盘可用") {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")))
+            })
         })
         addView(section("测试输入"))
         addView(EditText(this@MainActivity).apply {
@@ -427,10 +435,6 @@ class MainActivity : AppCompatActivity() {
         addView(brandTitle("账户"))
         addView(card().apply {
             addView(actionRow("设置", "外观、键盘、标点、触感与按键音") { showPage(Page.SETTINGS) })
-            addDivider(this)
-            addView(actionRow("权限授权", "麦克风权限与系统输入法") {
-                requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
-            })
             addDivider(this)
             addView(actionRow("关于我们", "") { showPage(Page.ABOUT) })
         })

@@ -25,6 +25,14 @@ class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
 
     fun full(code: String): List<IndexedCandidate> = find(FULL, code)
 
+    /**
+     * Returns nearby complete Pinyin codes for completion and typo recovery.
+     * The records are sorted in the on-disk index, so this reads only the matching
+     * range instead of scanning the 1.8M-entry text pool.
+     */
+    fun fullPrefix(code: String, maxRecords: Int): List<IndexedKeyCandidates> =
+        findPrefix(FULL, code, maxRecords)
+
     fun initials(code: String): List<IndexedCandidate> = find(INITIALS, code)
 
     fun t9(code: String): List<IndexedCandidate> = find(T9, code)
@@ -49,13 +57,43 @@ class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
         return emptyList()
     }
 
+    internal fun findPrefix(section: Int, prefix: String, maxRecords: Int): List<IndexedKeyCandidates> {
+        if (prefix.isBlank() || maxRecords <= 0) return emptyList()
+        val start = sections[section].toInt()
+        if (start <= 0 || start >= buffer.limit()) return emptyList()
+        val count = buffer.getInt(start)
+        val offsets = start + Int.SIZE_BYTES
+        var low = 0
+        var high = count
+        // Lower bound for the first key that is not lexicographically below prefix.
+        while (low < high) {
+            val middle = (low + high).ushr(1)
+            val offset = buffer.getLong(offsets + middle * Long.SIZE_BYTES).toInt()
+            if (compareKey(offset, prefix) < 0) low = middle + 1 else high = middle
+        }
+        val results = ArrayList<IndexedKeyCandidates>(minOf(maxRecords, 32))
+        var index = low
+        while (index < count && results.size < maxRecords) {
+            val offset = buffer.getLong(offsets + index * Long.SIZE_BYTES).toInt()
+            val key = readKey(offset)
+            if (!key.startsWith(prefix)) break
+            results += IndexedKeyCandidates(key, readCandidates(offset))
+            index += 1
+        }
+        return results
+    }
+
     private fun compareKey(offset: Int, expected: String): Int {
+        return readKey(offset).compareTo(expected)
+    }
+
+    private fun readKey(offset: Int): String {
         val length = buffer.getShort(offset).toInt() and 0xffff
         val actual = ByteArray(length)
         val duplicate = buffer.duplicate().order(ByteOrder.BIG_ENDIAN)
         duplicate.position(offset + Short.SIZE_BYTES)
         duplicate.get(actual)
-        return actual.toString(Charsets.UTF_8).compareTo(expected)
+        return actual.toString(Charsets.UTF_8)
     }
 
     private fun readCandidates(offset: Int): List<IndexedCandidate> {
@@ -82,6 +120,7 @@ class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
     }
 
     data class IndexedCandidate(val text: String, val weight: Int)
+    data class IndexedKeyCandidates(val code: String, val candidates: List<IndexedCandidate>)
 
     companion object {
         private const val MAGIC = 0x56504934 // VPI4

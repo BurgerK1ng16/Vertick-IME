@@ -355,19 +355,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     override fun onDraw(canvas: Canvas) {
-        // Keep the IME surface square at the bottom while exposing rounded top corners.
+        // The floating landscape surface is not attached to a screen edge, so all
+        // four corners use the same radius.
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         paint.style = Paint.Style.FILL
         paint.color = background
         val corner = dp(24)
         val surface = Path().apply {
-            moveTo(0f, corner)
-            quadTo(0f, 0f, corner, 0f)
-            lineTo(width - corner, 0f)
-            quadTo(width.toFloat(), 0f, width.toFloat(), corner)
-            lineTo(width.toFloat(), height.toFloat())
-            lineTo(0f, height.toFloat())
-            close()
+            addRoundRect(
+                RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                corner,
+                corner,
+                Path.Direction.CW
+            )
         }
         canvas.drawPath(surface, paint)
         targets.clear()
@@ -766,10 +766,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val box = RectF(x, y, x + keyWidth, y + keyHeight)
                 key(canvas, box)
                 if (letters == "'") {
-                    label(canvas, letters, box.centerX(), box.centerY() + dp(7), 25f, white, Paint.Align.CENTER, true)
+                    label(canvas, letters, box.centerX(), box.centerY() + dp(7), keyLetterSize(25f), white, Paint.Align.CENTER, true)
                 } else {
-                    label(canvas, letters, box.centerX(), box.centerY() - dp(3), 17f, white, Paint.Align.CENTER, true)
-                    label(canvas, code, box.centerX(), box.centerY() + dp(17), 12f, muted, Paint.Align.CENTER)
+                    label(canvas, letters, box.centerX(), box.centerY() - dp(3), keyLetterSize(17f), white, Paint.Align.CENTER, true)
+                    label(canvas, code, box.centerX(), box.centerY() + dp(17), keyLetterSize(12f), muted, Paint.Align.CENTER)
                 }
                 target(box, keySound = true) { actions.typePinyin(code) }
             }
@@ -860,7 +860,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val box = RectF(x, y, x + keyWidth, y + h)
             key(canvas, box)
             val output = if (pinyin || uppercase) character.uppercaseChar().toString() else character.toString()
-            label(canvas, output, box.centerX(), box.centerY() + dp(10), if (pinyin) 23f else 25f, white, Paint.Align.CENTER)
+            label(canvas, output, box.centerX(), box.centerY() + dp(10), keyLetterSize(if (pinyin) 23f else 25f), white, Paint.Align.CENTER)
             target(box, keySound = true) { if (pinyin) actions.typePinyin(character.toString()) else actions.typeEnglishLetter(output) }
         }
     }
@@ -882,7 +882,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val box = RectF(x, y, x + keyWidth, y + h)
             key(canvas, box)
             val output = if (pinyin || uppercase) character.uppercaseChar().toString() else character.toString()
-            label(canvas, output, box.centerX(), box.centerY() + dp(10), if (pinyin) 23f else 25f, white, Paint.Align.CENTER)
+            label(canvas, output, box.centerX(), box.centerY() + dp(10), keyLetterSize(if (pinyin) 23f else 25f), white, Paint.Align.CENTER)
             target(box, keySound = true) { if (pinyin) actions.typePinyin(character.toString()) else actions.typeEnglishLetter(output) }
         }
         val back = RectF(edge + rowWidth - delete, y, edge + rowWidth, y + h)
@@ -1587,6 +1587,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun dp(value: Int): Float = value * resources.displayMetrics.density
+    private fun keyLetterSize(size: Float): Float = if (isLandscape()) size * .8f else size
     private fun isLandscape(): Boolean =
         resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private fun hasComposition(): Boolean =

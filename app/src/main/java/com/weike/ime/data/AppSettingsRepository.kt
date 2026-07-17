@@ -12,12 +12,17 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 private val Context.settingsDataStore by preferencesDataStore("weike_settings")
 
 class AppSettingsRepository(private val context: Context) {
+    private val startupPreferences = context.applicationContext.getSharedPreferences(
+        KEYBOARD_STARTUP_PREFERENCES,
+        Context.MODE_PRIVATE
+    )
     private val overridesKey = stringPreferencesKey("style_overrides")
     private val punctuationKey = stringPreferencesKey("punctuation_preference")
     private val hapticStrengthKey = intPreferencesKey("haptic_strength")
@@ -104,6 +109,7 @@ class AppSettingsRepository(private val context: Context) {
     suspend fun hapticStrength(): HapticStrength = hapticStrength.first()
 
     suspend fun saveHapticStrength(strength: HapticStrength) {
+        startupPreferences.edit().putInt(STARTUP_HAPTIC, strength.storedValue).apply()
         context.settingsDataStore.edit { prefs -> prefs[hapticStrengthKey] = strength.storedValue }
     }
 
@@ -116,13 +122,16 @@ class AppSettingsRepository(private val context: Context) {
     suspend fun keyboardTheme(): KeyboardTheme = keyboardTheme.first()
 
     suspend fun saveKeyboardTheme(theme: KeyboardTheme) {
+        startupPreferences.edit().putString(STARTUP_THEME, theme.name).apply()
         context.settingsDataStore.edit { prefs -> prefs[keyboardThemeKey] = theme.name }
     }
 
     suspend fun keyboardSoundVolume(): Float = keyboardSoundVolume.first()
 
     suspend fun saveKeyboardSoundVolume(volume: Float) {
-        context.settingsDataStore.edit { prefs -> prefs[keyboardSoundVolumeKey] = volume.coerceIn(0f, 1f) }
+        val normalized = volume.coerceIn(0f, 1f)
+        startupPreferences.edit().putFloat(STARTUP_SOUND_VOLUME, normalized).apply()
+        context.settingsDataStore.edit { prefs -> prefs[keyboardSoundVolumeKey] = normalized }
     }
 
     suspend fun historyRetention(): HistoryRetention = historyRetention.first()
@@ -135,6 +144,7 @@ class AppSettingsRepository(private val context: Context) {
 
     suspend fun saveKeyboardModes(modes: List<KeyboardModePreference>) {
         val normalized = modes.distinct().ifEmpty { DEFAULT_KEYBOARD_MODES }
+        startupPreferences.edit().putString(STARTUP_MODES, normalized.joinToString(",") { it.name }).apply()
         context.settingsDataStore.edit { prefs ->
             prefs[keyboardModesKey] = normalized.joinToString(",") { it.name }
         }
@@ -143,7 +153,60 @@ class AppSettingsRepository(private val context: Context) {
     suspend fun chineseKeyboardLayout(): ChineseKeyboardLayout = chineseKeyboardLayout.first()
 
     suspend fun saveChineseKeyboardLayout(layout: ChineseKeyboardLayout) {
+        startupPreferences.edit().putString(STARTUP_CHINESE_LAYOUT, layout.name).apply()
         context.settingsDataStore.edit { prefs -> prefs[chineseKeyboardLayoutKey] = layout.name }
+    }
+
+    /**
+     * DataStore is asynchronous. An IME may be recreated during a display
+     * rotation before its first collection arrives, so keep this non-sensitive
+     * rendering snapshot in SharedPreferences for synchronous startup.
+     */
+    fun keyboardStartupState(): KeyboardStartupState {
+        val theme = startupPreferences.getString(STARTUP_THEME, null)
+            ?.let { runCatching { KeyboardTheme.valueOf(it) }.getOrNull() }
+            ?: KeyboardTheme.DARK
+        val layout = startupPreferences.getString(STARTUP_CHINESE_LAYOUT, null)
+            ?.let { runCatching { ChineseKeyboardLayout.valueOf(it) }.getOrNull() }
+            ?: ChineseKeyboardLayout.FULL
+        val modes = decodeKeyboardModes(startupPreferences.getString(STARTUP_MODES, null).orEmpty())
+        val haptic = HapticStrength.entries.firstOrNull {
+            it.storedValue == startupPreferences.getInt(STARTUP_HAPTIC, HapticStrength.MEDIUM.storedValue)
+        } ?: HapticStrength.MEDIUM
+        val volume = startupPreferences.getFloat(STARTUP_SOUND_VOLUME, DEFAULT_KEYBOARD_SOUND_VOLUME)
+            .coerceIn(0f, 1f)
+        return KeyboardStartupState(theme, layout, modes, haptic, volume, startupPreferences.contains(STARTUP_THEME))
+    }
+
+    /** A one-time upgrade bridge for an IME recreated before DataStore emits. */
+    fun keyboardStartupStateBlocking(): KeyboardStartupState = runBlocking {
+        val prefs = context.settingsDataStore.data.first()
+        val theme = runCatching { KeyboardTheme.valueOf(prefs[keyboardThemeKey].orEmpty()) }
+            .getOrDefault(KeyboardTheme.DARK)
+        val layout = runCatching { ChineseKeyboardLayout.valueOf(prefs[chineseKeyboardLayoutKey].orEmpty()) }
+            .getOrDefault(ChineseKeyboardLayout.FULL)
+        val modes = decodeKeyboardModes(prefs[keyboardModesKey].orEmpty())
+        val haptic = HapticStrength.entries.firstOrNull { it.storedValue == prefs[hapticStrengthKey] }
+            ?: HapticStrength.MEDIUM
+        val volume = (prefs[keyboardSoundVolumeKey] ?: DEFAULT_KEYBOARD_SOUND_VOLUME).coerceIn(0f, 1f)
+        cacheKeyboardStartupState(theme, layout, modes, haptic, volume)
+        KeyboardStartupState(theme, layout, modes, haptic, volume, true)
+    }
+
+    fun cacheKeyboardStartupState(
+        theme: KeyboardTheme? = null,
+        layout: ChineseKeyboardLayout? = null,
+        modes: List<KeyboardModePreference>? = null,
+        haptic: HapticStrength? = null,
+        soundVolume: Float? = null
+    ) {
+        startupPreferences.edit().apply {
+            theme?.let { putString(STARTUP_THEME, it.name) }
+            layout?.let { putString(STARTUP_CHINESE_LAYOUT, it.name) }
+            modes?.let { putString(STARTUP_MODES, it.joinToString(",") { mode -> mode.name }) }
+            haptic?.let { putInt(STARTUP_HAPTIC, it.storedValue) }
+            soundVolume?.let { putFloat(STARTUP_SOUND_VOLUME, it.coerceIn(0f, 1f)) }
+        }.apply()
     }
 
     suspend fun nineKeySymbols(): List<String> = nineKeySymbols.first()
@@ -254,6 +317,12 @@ class AppSettingsRepository(private val context: Context) {
         .ifEmpty { DEFAULT_NINE_KEY_SYMBOLS }
 
     companion object {
+        private const val KEYBOARD_STARTUP_PREFERENCES = "keyboard_startup_state"
+        private const val STARTUP_THEME = "theme"
+        private const val STARTUP_CHINESE_LAYOUT = "chinese_layout"
+        private const val STARTUP_MODES = "modes"
+        private const val STARTUP_HAPTIC = "haptic"
+        private const val STARTUP_SOUND_VOLUME = "sound_volume"
         private const val SECURE_ASR_KEY = "asr_api_key"
         private const val SECURE_TEXT_KEY = "text_api_key"
         const val DEFAULT_KEYBOARD_SOUND_VOLUME = .45f
@@ -276,3 +345,12 @@ class AppSettingsRepository(private val context: Context) {
         )
     }
 }
+
+data class KeyboardStartupState(
+    val theme: KeyboardTheme,
+    val chineseLayout: ChineseKeyboardLayout,
+    val modes: List<KeyboardModePreference>,
+    val haptic: HapticStrength,
+    val soundVolume: Float,
+    val isSeeded: Boolean
+)

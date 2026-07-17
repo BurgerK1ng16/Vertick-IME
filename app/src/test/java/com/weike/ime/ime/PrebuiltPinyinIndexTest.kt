@@ -32,4 +32,10 @@ class PrebuiltPinyinIndexTest {
         assertTrue(dictionary.initials("wsm").first().text == "为什么")
         assertTrue(dictionary.t9("64").first().text == "你")
     }
+
+    @Test
+    fun exactIndexContainsCommonSpokenPhrase() {
+        val dictionary = index()
+        assertTrue(dictionary.full("zaiganma").any { it.text == "在干嘛" })
+    }
 }

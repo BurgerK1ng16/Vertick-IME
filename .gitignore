@@ -15,4 +15,5 @@ boost-*.tar.xz
 third_party/sources/
 *.raw
 tmp_*.json
+build-*.log
 *.iml

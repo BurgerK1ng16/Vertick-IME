@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.9 - 2026-07-17
+
+### English
+
+- Rebuilt the landscape keyboard as an independent top-level floating window. It no longer reserves IME bottom insets or moves the focused editor upward.
+- The landscape surface now uses a fixed `1.7:1` width-to-height ratio, remains within 60% of the display height, and renders at 80% opacity.
+- The keyboard can be dragged freely across the landscape screen from the logo area. Dragging is disabled while candidates are visible so the first candidates remain directly tappable.
+- Reduced all landscape letter-key labels to 80% of their portrait size for the compact floating layout.
+- Fixed reopening the floating keyboard after it is dismissed: input-view and show requests are now scheduled from the service main loop, independent of a detached keyboard view.
+
+### 简体中文
+
+- 横屏键盘改为独立的顶层悬浮窗口，不再占用系统输入法底部空间，也不会顶起当前文本框。
+- 横屏悬浮键盘固定为 `1.7:1` 宽高比，高度不超过屏幕的 60%，整体透明度为 80%。
+- 可从 Logo 区域在横屏内任意拖动键盘；候选栏显示时自动关闭拖动热区，前几个候选词可以正常点选。
+- 横屏文字键盘的字母字号缩小至竖屏的 80%，适配紧凑悬浮布局。
+- 修复关闭横屏键盘后再次点击文本框无法调起的问题：输入视图和显示请求统一由输入法服务主线程重新创建悬浮窗口。
+
 ## 1.2.4 - 2026-07-17
 
 ### English

@@ -12,8 +12,15 @@ import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import android.view.MotionEvent
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.Toast
+import com.weike.ime.R
 import com.weike.ime.data.AppContainer
 import com.weike.ime.data.AppSettingsRepository
 import com.weike.ime.data.ChineseKeyboardLayout
@@ -55,6 +62,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private lateinit var container: AppContainer
     private lateinit var recorder: AudioRecorder
     private lateinit var keyboard: WeikeKeyboardView
+    private var inputViewHost: FrameLayout? = null
+    private var overlayHost: FrameLayout? = null
+    private var overlayWindowManager: WindowManager? = null
+    private var overlayLayoutParams: WindowManager.LayoutParams? = null
+    private var overlayPanel: FloatingKeyboardPanel? = null
     private lateinit var pinyinDecoder: LocalPinyinDecoder
     private lateinit var jieba: JiebaSegmenter
     private lateinit var clipboardManager: ClipboardManager
@@ -112,6 +124,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var activeRecordingDurationMs = 0L
     private var inputViewRecovery: InputViewRecovery? = null
     private var configurationChangeUntilMs = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var renderPending = false
     private val clearLearningReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: android.content.Intent) {
@@ -124,6 +137,20 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         super.onCreate()
         (retainedKeyboardMode ?: loadRetainedKeyboardMode())?.let { mode = it }
         container = AppContainer(this)
+        var startup = container.settings.keyboardStartupState()
+        // A cache is populated after the first settings observation. When an app
+        // upgrades from an older version, synchronously seed it once so a service
+        // recreated by rotation does not flash the default dark palette.
+        if (!startup.isSeeded) startup = container.settings.keyboardStartupStateBlocking()
+        keyboardThemePreference = startup.theme
+        keyboardTheme = resolveKeyboardTheme(startup.theme)
+        chineseKeyboardLayout = startup.chineseLayout
+        visibleKeyboardModes = startup.modes.map(::toKeyboardMode).distinct()
+        hapticStrength = startup.haptic
+        keyboardSoundVolume = startup.soundVolume
+        if (!isConfiguredMode(mode) && mode != KeyboardMode.SYMBOLS) {
+            mode = initialModeFor(visibleKeyboardModes.firstOrNull() ?: KeyboardMode.TEXT)
+        }
         recorder = AudioRecorder(this)
         pinyinDecoder = LocalPinyinDecoder(this)
         jieba = JiebaSegmenter(this)
@@ -136,17 +163,39 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             Context.RECEIVER_NOT_EXPORTED
         )
         serviceScope.launch {
-            for (operation in pinyinOperations) pinyinMutex.withLock { operation() }
+            for (operation in pinyinOperations) {
+                try {
+                    pinyinMutex.withLock { operation() }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    // A malformed dictionary record or a one-off InputConnection
+                    // failure must never kill the serialized key-event consumer.
+                    // Once that coroutine exits, every following nine-key press is
+                    // accepted by the view but remains forever queued.
+                    Log.e(TAG, "Pinyin operation failed; resetting composition", error)
+                    pendingPinyinMutations = 0
+                    runCatching {
+                        pinyinMutex.withLock {
+                            applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
+                        }
+                    }.onFailure { resetError ->
+                        Log.e(TAG, "Unable to recover Pinyin operation queue", resetError)
+                    }
+                }
+            }
         }
         serviceScope.launch {
             container.settings.hapticStrength.collect { strength ->
                 hapticStrength = strength
+                container.settings.cacheKeyboardStartupState(haptic = strength)
                 render()
             }
         }
         serviceScope.launch {
             container.settings.keyboardSoundVolume.collect { volume ->
                 keyboardSoundVolume = volume
+                container.settings.cacheKeyboardStartupState(soundVolume = volume)
                 render()
             }
         }
@@ -154,6 +203,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             container.settings.keyboardTheme.collect { theme ->
                 keyboardThemePreference = theme
                 keyboardTheme = resolveKeyboardTheme(theme)
+                container.settings.cacheKeyboardStartupState(theme = theme)
                 render()
             }
         }
@@ -166,12 +216,14 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                     if (voiceState != VoiceUiState.Idle || activeVoiceMode != null) cancelActiveVoiceSession()
                     mode = initialModeFor(visibleKeyboardModes.first())
                 }
+                container.settings.cacheKeyboardStartupState(modes = configured)
                 render()
             }
         }
         serviceScope.launch {
             container.settings.chineseKeyboardLayout.collect { layout ->
                 chineseKeyboardLayout = layout
+                container.settings.cacheKeyboardStartupState(layout = layout)
                 enqueuePinyin {
                     pinyinDecoder.selectChineseKeyboardLayout(layout)
                     applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
@@ -238,32 +290,246 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         }
     }
 
-    override fun onCreateInputView(): WeikeKeyboardView {
-        keyboard = WeikeKeyboardView(this, this)
+    override fun onCreateInputView(): FrameLayout {
+        Log.d(TAG, "onCreateInputView; mode=$mode; pinyin=${pinyinRawBuffer.length}; english=${englishBuffer.length}")
+        val host = FrameLayout(this)
+        inputViewHost = host
+        ensureKeyboard()
+        if (!isLandscapeOverlayActive()) attachKeyboardTo(host)
         render()
-        return keyboard
+        return host
     }
+
+    private fun ensureKeyboard() {
+        if (!::keyboard.isInitialized) keyboard = WeikeKeyboardView(this, this)
+    }
+
+    private fun attachKeyboardTo(host: ViewGroup) {
+        (keyboard.parent as? ViewGroup)?.removeView(keyboard)
+        if (keyboard.parent == null) {
+            host.addView(
+                keyboard,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+    }
+
+    private fun isLandscapeOverlayActive(): Boolean =
+        overlayHost != null && resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    private fun updateLandscapeOverlay() {
+        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
+            dismissLandscapeOverlay()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            toast("请先在维刻的快速开始中授权悬浮窗权限")
+            return
+        }
+        if (overlayHost != null) return
+        ensureKeyboard()
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        // Landscape floating keyboard: width : height = 1.7 : 1. Its height
+        // is capped at 60% of the available screen, then width is derived from
+        // that cap so the requested ratio never changes.
+        val maxPanelHeight = minOf(dp(330), (screenHeight * .60f).toInt())
+        val panelHeight = minOf(maxPanelHeight, ((screenWidth - dp(32)) / 1.7f).toInt())
+        val panelWidth = (panelHeight * 1.7f).toInt()
+        val panel = FloatingKeyboardPanel(
+            context = this,
+            canDrag = { pinyinBuffer.isBlank() && englishBuffer.isBlank() },
+            onClose = ::closeLandscapeKeyboard,
+            onMove = ::moveLandscapeKeyboard
+        )
+        panel.alpha = .80f
+        attachKeyboardTo(panel.keyboardHost)
+        val params = WindowManager.LayoutParams(
+            panelWidth,
+            panelHeight,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            x = (screenWidth - panelWidth) / 2
+            y = (screenHeight - panelHeight) / 2
+            title = "Vertick Landscape Keyboard"
+        }
+        runCatching {
+            val manager = getSystemService(WindowManager::class.java)
+            manager.addView(panel, params)
+            overlayHost = panel
+            overlayPanel = panel
+            overlayWindowManager = manager
+            overlayLayoutParams = params
+            Log.d(TAG, "Landscape overlay attached")
+            // Keep only the overlay at the top level. The standard IME window
+            // would otherwise reserve bottom insets and push the editor up.
+            mainHandler.post { requestHideSelf(0) }
+        }.onFailure { error ->
+            Log.e(TAG, "Unable to attach landscape overlay", error)
+            inputViewHost?.let(::attachKeyboardTo)
+        }
+    }
+
+    private fun scheduleLandscapeOverlay(delayMs: Long = 0L) {
+        // Do not post this work to `keyboard`: after a floating keyboard is
+        // closed that view has no attached window, and View.post() may never
+        // run. The service main looper remains valid across both IME windows.
+        mainHandler.removeCallbacks(landscapeOverlayRunnable)
+        mainHandler.postDelayed(landscapeOverlayRunnable, delayMs)
+    }
+
+    private val landscapeOverlayRunnable = Runnable { updateLandscapeOverlay() }
+
+    private fun dismissLandscapeOverlay() {
+        val host = overlayHost ?: return
+        runCatching { overlayWindowManager?.removeViewImmediate(host) }
+            .onFailure { Log.w(TAG, "Unable to remove landscape overlay", it) }
+        overlayHost = null
+        overlayPanel = null
+        overlayWindowManager = null
+        overlayLayoutParams = null
+    }
+
+    private fun moveLandscapeKeyboard(x: Int, y: Int) {
+        val host = overlayHost ?: return
+        val params = overlayLayoutParams ?: return
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        params.x = x.coerceIn(0, (screenWidth - params.width).coerceAtLeast(0))
+        params.y = y.coerceIn(0, (screenHeight - params.height).coerceAtLeast(0))
+        runCatching { overlayWindowManager?.updateViewLayout(host, params) }
+            .onFailure { Log.w(TAG, "Unable to move landscape overlay", it) }
+    }
+
+    private fun closeLandscapeKeyboard() {
+        dismissLandscapeOverlay()
+        // Reset the framework's IME session as well. The next focused text
+        // field produces onShowInputRequested(), where we reattach the overlay.
+        requestHideSelf(0)
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + .5f).toInt()
+
+    private inner class FloatingKeyboardPanel(
+        context: Context,
+        private val canDrag: () -> Boolean,
+        private val onClose: () -> Unit,
+        private val onMove: (Int, Int) -> Unit
+    ) : FrameLayout(context) {
+        val keyboardHost = FrameLayout(context)
+        private var dragStartX = 0f
+        private var dragStartY = 0f
+        private var panelStartX = 0f
+        private var panelStartY = 0f
+        private var dragging = false
+
+        init {
+            setWillNotDraw(false)
+            clipToOutline = false
+            addView(keyboardHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.ic_lucide_x)
+                setColorFilter(if (keyboardTheme == KeyboardTheme.DARK) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
+                setPadding(dp(9), dp(9), dp(9), dp(9))
+                contentDescription = "Close floating keyboard"
+                setOnClickListener { onClose() }
+            }, LayoutParams(dp(36), dp(36), android.view.Gravity.TOP or android.view.Gravity.END).apply {
+                topMargin = dp(7)
+                marginEnd = dp(7)
+            })
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            // Candidate rows replace the brand bar. Never intercept their first
+            // entries as a drag gesture.
+            val dragHandle = canDrag() && event.x <= dp(156) && event.y <= dp(58)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragging = dragHandle
+                    dragStartX = event.rawX
+                    dragStartY = event.rawY
+                    panelStartX = overlayLayoutParams?.x?.toFloat() ?: 0f
+                    panelStartY = overlayLayoutParams?.y?.toFloat() ?: 0f
+                    return dragging
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (dragging) {
+                        onMove(
+                            (panelStartX + event.rawX - dragStartX).toInt(),
+                            (panelStartY + event.rawY - dragStartY).toInt()
+                        )
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    dragging = false
+                    return true
+                }
+            }
+            return true
+        }
+
+        override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+            return when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    val dragHandle = canDrag() && event.x <= dp(156) && event.y <= dp(58)
+                    dragHandle
+                }
+                else -> dragging
+            }
+        }
+    }
+
+    /**
+     * The framework normally enters its legacy extract-editor UI in landscape.
+     * Vertick only owns a custom input view, not an extract view; allowing that
+     * transition replaces the keyboard with the framework's initial state and
+     * loses the active editor on HyperOS. Keep the regular IME surface in both
+     * orientations without changing its visual layout.
+     */
+    override fun onEvaluateFullscreenMode(): Boolean = false
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        val isPlaceholderConnection = (attribute?.fieldId ?: 0) < 0
         val recovery = inputViewRecovery?.takeIf {
-            it.matches(attribute, isSensitive(attribute)) &&
-                SystemClock.elapsedRealtime() <= it.expiresAtMs &&
-                (restarting || SystemClock.elapsedRealtime() <= configurationChangeUntilMs)
+            !isPlaceholderConnection &&
+                it.matches(attribute, isSensitive(attribute)) &&
+                SystemClock.elapsedRealtime() <= it.expiresAtMs
         }
+        val configurationRestart = recovery != null ||
+            (restarting && SystemClock.elapsedRealtime() <= configurationChangeUntilMs)
+        Log.d(
+            TAG,
+            "onStartInput; restarting=$restarting; package=${attribute?.packageName}; field=${attribute?.fieldId}; " +
+                "recovery=${recovery != null}; mode=$mode"
+        )
         inputViewRecovery = null
         if (voiceState != VoiceUiState.Idle || activeVoiceMode != null || rawTranscript.isNotBlank()) {
             cancelActiveVoiceSession()
         }
         lastPackageName = attribute?.packageName
         sensitiveField = isSensitive(attribute)
-        if (recovery == null) {
+        if (!configurationRestart) {
             currentInputConnection?.finishComposingText()
             clearTextCompositions()
             if (sensitiveField) mode = KeyboardMode.ENGLISH
-        } else {
+        } else if (recovery != null) {
             restoreInputViewRecovery(recovery)
             Log.d(TAG, "Restored IME session after configuration change; mode=${recovery.mode}")
+        } else {
+            // The client connection was recreated but Android did not send a
+            // finish callback. Preserve the existing decoder state rather than
+            // treating rotation as a new editor session.
+            Log.d(TAG, "Preserved IME session for configuration restart")
         }
         serviceScope.launch {
             style = if (sensitiveField) WritingStyle.RAW else container.settings.styleFor(attribute?.packageName.orEmpty())
@@ -273,49 +539,110 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             expressionOptimization = container.settings.expressionOptimizationEnabled()
             render()
         }
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // A new editor connection is the most reliable re-open signal on
+            // HyperOS after its normal IME window has been hidden.
+            ensureKeyboard()
+            scheduleLandscapeOverlay(80L)
+        }
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
-        Log.d(TAG, "onStartInputView; restarting=$restarting")
+        Log.d(TAG, "onStartInputView; restarting=$restarting; mode=$mode; pinyin=${pinyinRawBuffer.length}; english=${englishBuffer.length}")
         super.onStartInputView(info, restarting)
         // Some Xiaomi builds recreate only the input view. Reassert the composing
         // value against the newly supplied InputConnection in that case.
-        if (restarting && pinyinBuffer.isNotBlank()) updateComposingText(pinyinBuffer)
-        else if (restarting && englishBuffer.isNotBlank()) updateComposingText(englishBuffer)
+        if (pinyinBuffer.isNotBlank()) updateComposingText(pinyinBuffer)
+        else if (englishBuffer.isNotBlank()) updateComposingText(englishBuffer)
         if (::keyboard.isInitialized) keyboard.requestLayout()
+        scheduleLandscapeOverlay()
         render()
     }
 
+    override fun onShowInputRequested(flags: Int, configChange: Boolean): Boolean {
+        val accepted = super.onShowInputRequested(flags, configChange)
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // HyperOS often keeps its regular IME window hidden in landscape.
+            // Recreate our independent overlay whenever the user focuses a
+            // field after explicitly closing the previous floating keyboard.
+            ensureKeyboard()
+            scheduleLandscapeOverlay(80L)
+        }
+        return accepted
+    }
+
+    override fun onWindowShown() {
+        super.onWindowShown()
+        if (::keyboard.isInitialized) scheduleLandscapeOverlay()
+    }
+
     override fun onFinishInputView(finishingInput: Boolean) {
-        Log.d(TAG, "onFinishInputView; finishingInput=$finishingInput")
-        // A rotation finishes the view before a replacement is attached. Keep only
-        // non-sensitive text composition state; recording is intentionally stopped.
-        if (!finishingInput) captureInputViewRecovery()
-        else inputViewRecovery = null
+        Log.d(TAG, "onFinishInputView; finishingInput=$finishingInput; mode=$mode; pinyin=${pinyinRawBuffer.length}; english=${englishBuffer.length}")
+        // Xiaomi may report `finishingInput=true` while replacing the view during
+        // rotation. Keep a short-lived, same-editor snapshot in either case; a
+        // different field cannot restore it because InputViewRecovery.matches()
+        // checks the package, input type, and field id.
+        captureInputViewRecovery()
         stopVoice(cancelled = true)
         super.onFinishInputView(finishingInput)
     }
 
+    override fun onFinishInput() {
+        // Some Xiaomi rotation paths finish the editor before they finish the
+        // input view. Capture here too; the snapshot is accepted only by the
+        // same package/input type/field during the five-second rotation window.
+        captureInputViewRecovery()
+        Log.d(TAG, "onFinishInput; mode=$mode; pinyin=${pinyinRawBuffer.length}")
+        super.onFinishInput()
+    }
+
     override fun onWindowHidden() {
-        Log.d(TAG, "onWindowHidden")
+        // HyperOS hides and recreates the regular IME window during landscape
+        // rotation. That is precisely when the overlay takes over, so treating
+        // this callback as an explicit user dismissal creates an endless
+        // show/hide loop. Portrait uses the system IME normally and still
+        // clears any stale fallback surface.
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        Log.d(TAG, "onWindowHidden; mode=$mode; landscape=$landscape; overlay=${overlayHost != null}")
+        if (!landscape) dismissLandscapeOverlay()
         super.onWindowHidden()
+    }
+
+    override fun onUnbindInput() {
+        // Back gestures and editor changes can unbind the IME without sending a
+        // separate hide callback on HyperOS. The landscape surface must never
+        // outlive that input session.
+        dismissLandscapeOverlay()
+        super.onUnbindInput()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         captureInputViewRecovery()
         configurationChangeUntilMs = SystemClock.elapsedRealtime() + INPUT_VIEW_RECOVERY_WINDOW_MS
+        Log.d(TAG, "onConfigurationChanged; orientation=${newConfig.orientation}; mode=$mode; pinyin=${pinyinRawBuffer.length}")
         super.onConfigurationChanged(newConfig)
         if (keyboardThemePreference == KeyboardTheme.SYSTEM) {
             keyboardTheme = resolveKeyboardTheme(keyboardThemePreference)
             render()
         }
         if (::keyboard.isInitialized) keyboard.requestLayout()
-        if (mode == KeyboardMode.PINYIN) requestPinyinEngine()
+        // The mapped dictionary is already alive. Reopening it on every rotation
+        // races with composition restore and previously cleared the nine-key code.
+        // A cold service still initializes through onCreate().
+        if (newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
+            // The overlay is only a landscape fallback. Never leave it attached
+            // above the app after the user returns to portrait.
+            dismissLandscapeOverlay()
+        } else {
+            scheduleLandscapeOverlay()
+        }
         render()
     }
 
     override fun onDestroy() {
         stopVoice(cancelled = true)
+        mainHandler.removeCallbacks(landscapeOverlayRunnable)
+        dismissLandscapeOverlay()
         if (::keyboard.isInitialized) keyboard.releaseResources()
         engineLoadJob?.cancel()
         engineIdleReleaseJob?.cancel()
@@ -1125,6 +1452,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             expiresAtMs = SystemClock.elapsedRealtime() + INPUT_VIEW_RECOVERY_WINDOW_MS
         )
         inputViewRecovery = recovery
+        Log.d(TAG, "Captured IME recovery; mode=${recovery.mode}; pinyin=${recovery.pinyinCode.length}; field=${recovery.fieldId}")
         serviceScope.launch {
             delay(INPUT_VIEW_RECOVERY_WINDOW_MS)
             if (inputViewRecovery === recovery) inputViewRecovery = null
@@ -1132,6 +1460,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun restoreInputViewRecovery(recovery: InputViewRecovery) {
+        Log.d(TAG, "Restoring IME recovery; mode=${recovery.mode}; pinyin=${recovery.pinyinCode.length}; field=${recovery.fieldId}")
         mode = recovery.mode
         modeBeforeSymbols = recovery.modeBeforeSymbols
         rememberKeyboardMode(mode)
@@ -1272,6 +1601,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private val INPUT_UNIT_PATTERN = Regex("[\\u4E00-\\u9FFF]|[A-Za-z]+(?:['-][A-Za-z]+)*|\\d+(?:[.,]\\d+)?")
         private const val MAX_CLIPBOARD_CONTENT_LENGTH = 4_096
         private const val INPUT_VIEW_RECOVERY_WINDOW_MS = 5_000L
+        private const val LANDSCAPE_OVERLAY_HEIGHT_DP = 258
         private const val IME_STATE_PREFERENCES = "ime_view_state"
         private const val KEY_RETAINED_KEYBOARD_MODE = "retained_keyboard_mode"
         private val SENSITIVE_CLIPBOARD_MARKERS = Regex(
@@ -1294,7 +1624,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         fun matches(info: EditorInfo?, sensitive: Boolean): Boolean =
             !sensitive &&
                 packageName == info?.packageName.orEmpty() &&
-                inputType == (info?.inputType ?: 0) &&
-                (fieldId == 0 || info?.fieldId == 0 || fieldId == info?.fieldId)
+                // HyperOS creates a short-lived placeholder connection during
+                // rotation (field -1 / input type 0), then immediately replaces
+                // it with the actual editor (typically field 0). Treat unknown
+                // values as wildcards, while still rejecting another package.
+                (inputType == 0 || info?.inputType == 0 || inputType == info?.inputType) &&
+                (fieldId <= 0 || (info?.fieldId ?: 0) <= 0 || fieldId == info?.fieldId)
     }
 }
