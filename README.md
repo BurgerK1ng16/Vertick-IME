@@ -14,7 +14,7 @@ Vertick IME is an open-source Chinese input method for Android 15 and later. It 
   <img src="https://edgeoneimg.cdn.sn/i/6a574692127f4_1784104594.webp" alt="Dictation and polishing in dark mode" width="49%" />
   <img src="https://edgeoneimg.cdn.sn/i/6a5746921c074_1784104594.webp" alt="Dictation and polishing in light mode" width="49%" />
 </p>
-
+##项目正处于快速迭代阶段，遇到问题请提出issues或检查更新
 ## Features and Privacy
 
 - Offline Pinyin candidates and on-device learning powered by Rime-Ice.
