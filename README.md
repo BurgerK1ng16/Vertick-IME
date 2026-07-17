@@ -1,8 +1,9 @@
 <p align="center">
   <img src="docs/images/app-icon.png" alt="Vertick logo" width="88" height="88" style="border-radius: 18px;" />
 </p>
-<h1 align="center">The project is currently in a fast iteration mode, so please make sure to check for updates!</h1>
+
 <h1 align="center">Vertick IME</h1>
+<h1 align="center">The project is currently in a fast iteration mode, so please make sure to check for updates!</h1>
 
 <p align="center">
   <a href="README_CN.md">简体中文</a> | <a href="https://github.com/BurgerK1ng16/Vertick-IME/releases">Download releases</a>
