@@ -2,8 +2,10 @@
 
 [English](README.md) | [下载正式版](https://github.com/BurgerK1ng16/Vertick-IME/releases)
 
-维刻输入法是面向 Android 15+ 的开源中文输入法，提供离线拼音、英文候选、语音听写、文本润色和问答模式。项目采用 [GPL-3.0-or-later](LICENSE) 发布。
 ⚠️项目目前处于快速迭代模式，请注意检查更新
+
+维刻输入法是面向 Android 15+ 的开源中文输入法，提供离线拼音、英文候选、语音听写、文本润色和问答模式。项目采用 [GPL-3.0-or-later](LICENSE) 发布。
+
 <p align="center">
   <img src="https://edgeoneimg.cdn.sn/i/6a574692127f4_1784104594.webp" alt="暗色模式下的听写和润色" width="49%" />
   <img src="https://edgeoneimg.cdn.sn/i/6a5746921c074_1784104594.webp" alt="亮色模式下的听写和润色" width="49%" />
