@@ -11,6 +11,7 @@ import android.view.inputmethod.InputConnection
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import com.weike.ime.data.AppContainer
@@ -54,7 +55,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private lateinit var container: AppContainer
     private lateinit var recorder: AudioRecorder
     private lateinit var keyboard: WeikeKeyboardView
-    private lateinit var pinyinDecoder: RimePinyinDecoder
+    private lateinit var pinyinDecoder: LocalPinyinDecoder
     private lateinit var jieba: JiebaSegmenter
     private lateinit var clipboardManager: ClipboardManager
     @Volatile private var cloudApiSettings = CloudApiSettings()
@@ -75,13 +76,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var chineseKeyboardLayout = ChineseKeyboardLayout.FULL
     private var nineKeySymbols = AppSettingsRepository.DEFAULT_NINE_KEY_SYMBOLS
     private var pinyinBuffer = ""
+    // Unlike pinyinBuffer this keeps the actual decoder code. They differ for T9:
+    // the editor displays "ni" while the decoder must retain "64".
+    private var pinyinRawBuffer = ""
     private var pinyinCandidates: List<PinyinCandidate> = emptyList()
     private val pinyinMutex = Mutex()
     private val languageEngineMutex = Mutex()
     private val pinyinOperations = Channel<suspend () -> Unit>(Channel.UNLIMITED)
-    private var pinyinReady = false
-    // Keeps text input usable while the full Rime-Ice table is compiling for the first time.
-    private var fallbackPinyinComposition = false
+    // The local decoder is available before the background phrase index has loaded.
+    private var pinyinReady = true
     private var engineLoadJob: Job? = null
     private var engineIdleReleaseJob: Job? = null
     private var rimeTermStageJob: Job? = null
@@ -107,6 +110,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var lastPackageName: String? = null
     private var voiceStartedAtMs = 0L
     private var activeRecordingDurationMs = 0L
+    private var inputViewRecovery: InputViewRecovery? = null
+    private var configurationChangeUntilMs = 0L
     @Volatile private var renderPending = false
     private val clearLearningReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: android.content.Intent) {
@@ -117,10 +122,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun onCreate() {
         super.onCreate()
-        retainedKeyboardMode?.let { mode = it }
+        (retainedKeyboardMode ?: loadRetainedKeyboardMode())?.let { mode = it }
         container = AppContainer(this)
         recorder = AudioRecorder(this)
-        pinyinDecoder = RimePinyinDecoder(this)
+        pinyinDecoder = LocalPinyinDecoder(this)
         jieba = JiebaSegmenter(this)
         clipboardManager = getSystemService(ClipboardManager::class.java)
         clipboardManager.addPrimaryClipChangedListener(clipboardListener)
@@ -167,7 +172,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         serviceScope.launch {
             container.settings.chineseKeyboardLayout.collect { layout ->
                 chineseKeyboardLayout = layout
-                if (pinyinReady) enqueuePinyin {
+                enqueuePinyin {
                     pinyinDecoder.selectChineseKeyboardLayout(layout)
                     applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
                 }
@@ -241,19 +246,25 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        val recovery = inputViewRecovery?.takeIf {
+            it.matches(attribute, isSensitive(attribute)) &&
+                SystemClock.elapsedRealtime() <= it.expiresAtMs &&
+                (restarting || SystemClock.elapsedRealtime() <= configurationChangeUntilMs)
+        }
+        inputViewRecovery = null
         if (voiceState != VoiceUiState.Idle || activeVoiceMode != null || rawTranscript.isNotBlank()) {
             cancelActiveVoiceSession()
         }
-        currentInputConnection?.finishComposingText()
         lastPackageName = attribute?.packageName
         sensitiveField = isSensitive(attribute)
-        pinyinBuffer = ""
-        pinyinCandidates = emptyList()
-        fallbackPinyinComposition = false
-        englishBuffer = ""
-        englishCandidates = emptyList()
-        enqueuePinyin { if (pinyinReady) pinyinDecoder.clear() }
-        if (sensitiveField) mode = KeyboardMode.ENGLISH
+        if (recovery == null) {
+            currentInputConnection?.finishComposingText()
+            clearTextCompositions()
+            if (sensitiveField) mode = KeyboardMode.ENGLISH
+        } else {
+            restoreInputViewRecovery(recovery)
+            Log.d(TAG, "Restored IME session after configuration change; mode=${recovery.mode}")
+        }
         serviceScope.launch {
             style = if (sensitiveField) WritingStyle.RAW else container.settings.styleFor(attribute?.packageName.orEmpty())
             punctuation = container.settings.punctuationPreference()
@@ -267,10 +278,20 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         Log.d(TAG, "onStartInputView; restarting=$restarting")
         super.onStartInputView(info, restarting)
+        // Some Xiaomi builds recreate only the input view. Reassert the composing
+        // value against the newly supplied InputConnection in that case.
+        if (restarting && pinyinBuffer.isNotBlank()) updateComposingText(pinyinBuffer)
+        else if (restarting && englishBuffer.isNotBlank()) updateComposingText(englishBuffer)
+        if (::keyboard.isInitialized) keyboard.requestLayout()
+        render()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         Log.d(TAG, "onFinishInputView; finishingInput=$finishingInput")
+        // A rotation finishes the view before a replacement is attached. Keep only
+        // non-sensitive text composition state; recording is intentionally stopped.
+        if (!finishingInput) captureInputViewRecovery()
+        else inputViewRecovery = null
         stopVoice(cancelled = true)
         super.onFinishInputView(finishingInput)
     }
@@ -281,6 +302,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
+        captureInputViewRecovery()
+        configurationChangeUntilMs = SystemClock.elapsedRealtime() + INPUT_VIEW_RECOVERY_WINDOW_MS
         super.onConfigurationChanged(newConfig)
         if (keyboardThemePreference == KeyboardTheme.SYSTEM) {
             keyboardTheme = resolveKeyboardTheme(keyboardThemePreference)
@@ -331,7 +354,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private fun applyMode(nextMode: KeyboardMode) {
         val previous = mode
         mode = nextMode
-        if (mode != KeyboardMode.SYMBOLS) retainedKeyboardMode = mode
+        rememberKeyboardMode(mode)
         if (mode == KeyboardMode.PINYIN) requestPinyinEngine()
         if (previous == KeyboardMode.PINYIN && mode != KeyboardMode.PINYIN) scheduleLanguageEngineRelease()
         render()
@@ -339,28 +362,17 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     private fun requestPinyinEngine() {
         engineIdleReleaseJob?.cancel()
-        if (pinyinReady || engineLoadJob?.isActive == true) return
-        engineLoadJob = serviceScope.launch {
-            languageEngineMutex.withLock {
-                if (pinyinReady) return@withLock
-                pinyinReady = false
-                render()
+        // Do not gate typing on dictionary work. The decoder has a synchronous core
+        // index and grows its phrase index behind the scenes.
+        pinyinReady = true
+        if (engineLoadJob?.isActive == true) return
+        engineLoadJob = serviceScope.launch(Dispatchers.Default) {
+            runCatching {
                 ensureLatestLanguageData()
-                ensureJiebaReadyLocked()
-                pinyinReady = runCatching {
-                    pinyinDecoder.startSession(lastSyncedTerms, lastSyncedTypingDictionary)
-                }
-                    .onFailure { Log.e(TAG, "Unable to prepare Rime", it) }
-                    .getOrDefault(false)
-                if (pinyinReady) {
-                    pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
-                    // Never replay a first-run fallback into a newly initialized native session.
-                    if (!fallbackPinyinComposition) applyPinyinState(pinyinDecoder.clear(), allowCommit = false)
-                }
-                if (pinyinReady && RimePinyinDecoder.consumeClearRequest(this@WeikeInputMethodService)) {
-                    pinyinReady = pinyinDecoder.clearUserLearning()
-                }
-            }
+                pinyinDecoder.startSession(lastSyncedTerms, lastSyncedTypingDictionary)
+                pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
+                ensureJiebaReady()
+            }.onFailure { Log.e(TAG, "Unable to start local Pinyin index", it) }
             render()
         }
     }
@@ -390,13 +402,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun deferRimeTermSync() {
-        // Immediate matching uses the in-memory overlay. Persist the term list for
-        // the next Rime deployment without restarting the live decoder.
+        // Updating a user dictionary only updates an in-memory overlay. It must not
+        // restart or compile an engine while the user is typing.
         rimeTermStageJob?.cancel()
         rimeTermStageJob = serviceScope.launch(Dispatchers.Default) {
             runCatching {
-                pinyinDecoder.stageProfessionalTerms(lastSyncedTerms, lastSyncedTypingDictionary)
-            }.onFailure { Log.e(TAG, "Unable to stage Rime terms", it) }
+                pinyinDecoder.syncProfessionalTerms(lastSyncedTerms, lastSyncedTypingDictionary)
+            }.onFailure { Log.e(TAG, "Unable to update local Pinyin terms", it) }
         }
     }
 
@@ -893,21 +905,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun typePinyin(value: String) {
-        if (!pinyinReady || fallbackPinyinComposition) {
-            requestPinyinEngine()
-            fallbackPinyinComposition = true
-            pinyinBuffer += value.lowercase()
-            pinyinCandidates = fallbackPinyinCandidates(pinyinBuffer)
-            updateComposingText(pinyinBuffer)
-            render()
-            return
-        }
         engineIdleReleaseJob?.cancel()
         pendingPinyinMutations += 1
         enqueuePinyin {
             try {
-                // Rime can emit a raw unfinished initial. Only explicit candidate
-                // selection is allowed to reach the focused editor.
                 applyPinyinState(pinyinDecoder.input(value.lowercase()), allowCommit = false)
             } finally {
                 pendingPinyinMutations -= 1
@@ -916,16 +917,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun chooseCandidate(candidate: PinyinCandidate) {
-        if (!pinyinReady || fallbackPinyinComposition) {
-            if (candidate.directCommit) {
-                fallbackPinyinComposition = false
-                commitFallbackPinyin(candidate.text)
-            }
-            return
-        }
         enqueuePinyin {
-            if (candidate.directCommit) commitDirectPinyin(candidate.text)
-            else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
+            commitDirectPinyin(candidate.text)
         }
     }
 
@@ -953,18 +946,9 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun backspace() {
         if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
-            if (fallbackPinyinComposition) {
-                pinyinBuffer = pinyinBuffer.dropLast(1)
-                pinyinCandidates = fallbackPinyinCandidates(pinyinBuffer)
-                if (pinyinBuffer.isEmpty()) fallbackPinyinComposition = false
-                updateComposingText(pinyinBuffer)
-                render()
-                return
-            }
             pendingPinyinMutations += 1
             enqueuePinyin {
                 try {
-                    // Never apply Rime's automatic commit while editing composition.
                     applyPinyinState(pinyinDecoder.backspace(), allowCommit = false)
                 } finally {
                     pendingPinyinMutations -= 1
@@ -1083,29 +1067,22 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private fun applyPinyinState(state: PinyinSessionState, allowCommit: Boolean = true) {
         if (allowCommit) state.committedText?.let { currentInputConnection?.commitText(it, 1) }
         pinyinBuffer = state.preedit
-        val merged = mergeCustomPinyinCandidates(state.preedit, state.candidates)
-        pinyinCandidates = if (merged.isNotEmpty() || state.preedit.isBlank()) merged else fallbackPinyinCandidates(state.preedit)
+        pinyinRawBuffer = state.rawComposition
+        pinyinCandidates = state.candidates
         updateComposingText(pinyinBuffer)
         render()
     }
 
     private suspend fun commitCurrentPinyin() {
-        if (fallbackPinyinComposition) {
-            val fallback = pinyinCandidates.firstOrNull()?.text ?: pinyinBuffer
-            fallbackPinyinComposition = false
-            commitFallbackPinyin(fallback)
-            return
-        }
         val candidate = pinyinCandidates.firstOrNull() ?: return
-        if (candidate.directCommit) commitDirectPinyin(candidate.text)
-        else if (candidate.index >= 0) applyPinyinState(pinyinDecoder.selectCandidate(candidate.index))
+        commitDirectPinyin(candidate.text)
     }
 
     private suspend fun commitRawPinyin() {
         val raw = pinyinDecoder.currentState().preedit.ifBlank { pinyinBuffer }
-        if (pinyinReady && !fallbackPinyinComposition) pinyinDecoder.clear()
-        fallbackPinyinComposition = false
+        pinyinDecoder.clear()
         pinyinBuffer = ""
+        pinyinRawBuffer = ""
         pinyinCandidates = emptyList()
         updateComposingText("")
         if (raw.isNotBlank()) currentInputConnection?.commitText(raw, 1)
@@ -1113,83 +1090,85 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitDirectPinyin(text: String) {
-        if (pinyinReady && !fallbackPinyinComposition) pinyinDecoder.clear()
-        fallbackPinyinComposition = false
+        pinyinDecoder.clear()
         pinyinBuffer = ""
+        pinyinRawBuffer = ""
         pinyinCandidates = emptyList()
         updateComposingText("")
         currentInputConnection?.commitText(text, 1)
         render()
-    }
-
-    private fun commitFallbackPinyin(text: String) {
-        pinyinBuffer = ""
-        pinyinCandidates = emptyList()
-        updateComposingText("")
-        currentInputConnection?.commitText(text, 1)
-        render()
-    }
-
-    private fun fallbackPinyinCandidates(preedit: String): List<PinyinCandidate> {
-        if (preedit.isBlank()) return emptyList()
-        // Keep the raw sequence available as an explicit candidate. Custom terms are
-        // still merged in front, so a freshly added word is immediately useful.
-        return mergeCustomPinyinCandidates(
-            preedit,
-            listOf(PinyinCandidate(preedit, score = -1.0, index = -1, directCommit = true))
-        )
-    }
-
-    private fun mergeCustomPinyinCandidates(
-        preedit: String,
-        nativeCandidates: List<PinyinCandidate>
-    ): List<PinyinCandidate> {
-        val query = preedit.lowercase().replace("'", "").trim()
-        if (query.isBlank()) return nativeCandidates
-        val custom = (lastSyncedTypingDictionary.map { it.term to it.hint } + lastSyncedTerms.map { it.term to it.hint })
-            .asSequence()
-            .mapNotNull { (term, hint) ->
-                val codeParts = pinyinDecoder.pinyinCodeForTerm(term, hint)
-                    .split(' ')
-                    .filter(String::isNotBlank)
-                if (codeParts.isEmpty()) return@mapNotNull null
-                val fullCode = pinyinInputCode(codeParts.joinToString(""))
-                val initials = pinyinInputCode(codeParts.joinToString("") { it.take(1) })
-                val fullMatch = query == fullCode
-                val initialsMatch = query.length >= 3 && initials.startsWith(query)
-                if (fullMatch || initialsMatch) PinyinCandidate(
-                    text = term,
-                    score = Double.MAX_VALUE,
-                    index = -1,
-                    directCommit = true
-                ) else null
-            }
-            .distinctBy { it.text }
-            .toList()
-        if (custom.isEmpty()) return nativeCandidates
-        return custom + nativeCandidates.filterNot { native -> custom.any { it.text == native.text } }
-    }
-
-    private fun pinyinInputCode(value: String): String {
-        if (chineseKeyboardLayout != ChineseKeyboardLayout.NINE_KEY) return value
-        return value.map { character ->
-            when (character) {
-                in 'a'..'c' -> '2'
-                in 'd'..'f' -> '3'
-                in 'g'..'i' -> '4'
-                in 'j'..'l' -> '5'
-                in 'm'..'o' -> '6'
-                in 'p'..'s' -> '7'
-                in 't'..'v' -> '8'
-                in 'w'..'z' -> '9'
-                else -> character
-            }
-        }.joinToString("")
     }
 
     private fun enqueuePinyin(block: suspend () -> Unit) {
         pinyinOperations.trySend(block)
     }
+
+    private fun clearTextCompositions() {
+        pinyinBuffer = ""
+        pinyinRawBuffer = ""
+        pinyinCandidates = emptyList()
+        englishBuffer = ""
+        englishCandidates = emptyList()
+        enqueuePinyin { pinyinDecoder.clear() }
+    }
+
+    private fun captureInputViewRecovery() {
+        if (sensitiveField) return
+        val recovery = InputViewRecovery(
+            packageName = lastPackageName.orEmpty(),
+            inputType = currentInputEditorInfo?.inputType ?: 0,
+            fieldId = currentInputEditorInfo?.fieldId ?: 0,
+            mode = mode,
+            modeBeforeSymbols = modeBeforeSymbols,
+            pinyinCode = pinyinRawBuffer,
+            englishCode = englishBuffer,
+            expiresAtMs = SystemClock.elapsedRealtime() + INPUT_VIEW_RECOVERY_WINDOW_MS
+        )
+        inputViewRecovery = recovery
+        serviceScope.launch {
+            delay(INPUT_VIEW_RECOVERY_WINDOW_MS)
+            if (inputViewRecovery === recovery) inputViewRecovery = null
+        }
+    }
+
+    private fun restoreInputViewRecovery(recovery: InputViewRecovery) {
+        mode = recovery.mode
+        modeBeforeSymbols = recovery.modeBeforeSymbols
+        rememberKeyboardMode(mode)
+        pinyinBuffer = ""
+        pinyinRawBuffer = ""
+        pinyinCandidates = emptyList()
+        englishBuffer = recovery.englishCode
+        englishCandidates = EnglishCandidateEngine.candidates(englishBuffer)
+        if (recovery.pinyinCode.isNotBlank() && mode == KeyboardMode.PINYIN) {
+            requestPinyinEngine()
+            enqueuePinyin {
+                applyPinyinState(pinyinDecoder.restoreComposition(recovery.pinyinCode), allowCommit = false)
+            }
+        } else {
+            updateComposingText(englishBuffer)
+            render()
+        }
+    }
+
+    /**
+     * Xiaomi can occasionally recreate just the IME service while rotating. Keep
+     * the selected surface, but never text, audio, candidates, or cloud settings.
+     */
+    private fun rememberKeyboardMode(value: KeyboardMode) {
+        val retained = if (value == KeyboardMode.SYMBOLS) modeBeforeSymbols else value
+        retainedKeyboardMode = retained
+        getSharedPreferences(IME_STATE_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_RETAINED_KEYBOARD_MODE, retained.name)
+            .apply()
+    }
+
+    private fun loadRetainedKeyboardMode(): KeyboardMode? = runCatching {
+        getSharedPreferences(IME_STATE_PREFERENCES, MODE_PRIVATE)
+            .getString(KEY_RETAINED_KEYBOARD_MODE, null)
+            ?.let(KeyboardMode::valueOf)
+    }.getOrNull()
 
     private fun resolveKeyboardTheme(preference: KeyboardTheme): KeyboardTheme = when (preference) {
         KeyboardTheme.SYSTEM -> {
@@ -1248,15 +1227,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun clearPinyinLearning() {
-        RimePinyinDecoder.consumeClearRequest(this)
-        pinyinReady = false
-        render()
         serviceScope.launch {
-            pinyinReady = runCatching { pinyinMutex.withLock { pinyinDecoder.clearUserLearning() } }
-                .onFailure { Log.e(TAG, "Unable to clear Rime learning data", it) }
+            val cleared = runCatching { pinyinMutex.withLock { pinyinDecoder.clearUserLearning() } }
+                .onFailure { Log.e(TAG, "Unable to clear local Pinyin learning data", it) }
                 .getOrDefault(false)
             render()
-            toast(if (pinyinReady) "已清除本机候选学习数据" else "清除学习数据失败")
+            toast(if (cleared) "已清除本机候选学习数据" else "清除学习数据失败")
         }
     }
 
@@ -1295,9 +1271,30 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private const val MAX_PCM_BYTES = AudioRecorder.MAX_RECORDING_SECONDS * AudioRecorder.SAMPLE_RATE * 2
         private val INPUT_UNIT_PATTERN = Regex("[\\u4E00-\\u9FFF]|[A-Za-z]+(?:['-][A-Za-z]+)*|\\d+(?:[.,]\\d+)?")
         private const val MAX_CLIPBOARD_CONTENT_LENGTH = 4_096
+        private const val INPUT_VIEW_RECOVERY_WINDOW_MS = 5_000L
+        private const val IME_STATE_PREFERENCES = "ime_view_state"
+        private const val KEY_RETAINED_KEYBOARD_MODE = "retained_keyboard_mode"
         private val SENSITIVE_CLIPBOARD_MARKERS = Regex(
             "(?i)(password|passwd|passcode|验证码|动态码|verification\\s*code|one[- ]?time\\s*password|otp)"
         )
         const val ACTION_CLEAR_RIME_LEARNING = "com.weike.ime.action.CLEAR_RIME_LEARNING"
+    }
+
+    /** Kept only in memory and only long enough to bridge an IME view recreation. */
+    private data class InputViewRecovery(
+        val packageName: String,
+        val inputType: Int,
+        val fieldId: Int,
+        val mode: KeyboardMode,
+        val modeBeforeSymbols: KeyboardMode,
+        val pinyinCode: String,
+        val englishCode: String,
+        val expiresAtMs: Long
+    ) {
+        fun matches(info: EditorInfo?, sensitive: Boolean): Boolean =
+            !sensitive &&
+                packageName == info?.packageName.orEmpty() &&
+                inputType == (info?.inputType ?: 0) &&
+                (fieldId == 0 || info?.fieldId == 0 || fieldId == info?.fieldId)
     }
 }

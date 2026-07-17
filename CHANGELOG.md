@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.4 - 2026-07-17
+
+### English
+
+- Fixed IME state loss during landscape rotation. Recreating the input view now preserves the active keyboard surface and restores unfinished Pinyin or English composition instead of resetting the keyboard.
+- Fixed the last composing letter being accidentally committed during rotation. This also preserves the internal nine-key code so candidates remain correct after restoring the view.
+- Voice recording is safely cancelled during a rotation; no stale recording or network result can be inserted into the newly recreated input connection.
+- Added a lightweight mode restore for Xiaomi system cases that recreate the IME service itself during rotation. It stores only the last keyboard mode, never typed text, audio, candidates, or cloud credentials.
+
+### 简体中文
+
+- 修复横屏切换时输入法状态丢失：输入视图重建后会保留当前键盘界面，并恢复未上屏的拼音或英文组合态，不再回到初始状态。
+- 修复旋转过程中最后一个组合字母意外上屏；九宫格会保留原始数字编码，恢复后候选词保持正确。
+- 横竖屏切换会安全停止录音，不会把失效录音或旧网络结果写入新输入框。
+- 针对小米系统旋转时可能重建输入法服务的情况，新增轻量模式恢复。仅保存上次键盘模式，绝不保存输入文本、录音、候选词或云端凭据。
+
 ## 1.2.3 - 2026-07-16
 
 ### English

@@ -118,6 +118,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var pressedBox: RectF? = null
     private var activeTarget: TouchTarget? = null
     private var activeTargetCancelled = false
+    private var primaryPointerId = MotionEvent.INVALID_POINTER_ID
+    // All pointers, including the first one, are tracked independently. The old
+    // implementation tracked only secondary pointers, so lifting the first finger
+    // before the second silently discarded its key.
     private val secondaryTouches = mutableMapOf<Int, TouchTarget>()
     private val cancelledSecondaryTouches = mutableSetOf<Int>()
     private var longPressTriggered = false
@@ -606,17 +610,39 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val centerX = width / 2f
         val maskTop = height - height * .52f * progress
         val mask = RectF(-dp(32), maskTop, width + dp(32), height + dp(32))
-        val polishColor = if (longPressTranslationSelected) Color.rgb(190, 190, 193) else key
+        // Selection is expressed by contrast, not by making the inactive target
+        // brighter. Dark mode selects white; light mode selects black.
+        val selectedFill = white
+        val polishSelected = !longPressTranslationSelected
+        val polishColor = if (polishSelected) selectedFill else key
         rounded(canvas, mask, width.toFloat() / 2f, blend(key, polishColor, progress))
-        label(canvas, "松开以润色", centerX, maskTop + dp(48), 19f, actionIcon, Paint.Align.CENTER, true)
+        label(
+            canvas,
+            "松开以润色",
+            centerX,
+            maskTop + dp(48),
+            19f,
+            if (polishSelected) actionIcon else white,
+            Paint.Align.CENTER,
+            true
+        )
 
         val capsuleWidth = width * .66f
         val capsuleHeight = dp(68)
         val capsuleBottom = maskTop - dp(18)
         val capsule = RectF(centerX - capsuleWidth / 2f, capsuleBottom - capsuleHeight, centerX + capsuleWidth / 2f, capsuleBottom)
-        val translationColor = if (longPressTranslationSelected) key else Color.rgb(226, 226, 228)
+        val translationColor = if (longPressTranslationSelected) selectedFill else key
         rounded(canvas, capsule, capsuleHeight / 2f, blend(key, translationColor, progress))
-        label(canvas, "英语（美国）", centerX, capsule.centerY() + dp(7), 22f, actionIcon, Paint.Align.CENTER, true)
+        label(
+            canvas,
+            "英语（美国）",
+            centerX,
+            capsule.centerY() + dp(7),
+            22f,
+            if (longPressTranslationSelected) actionIcon else white,
+            Paint.Align.CENTER,
+            true
+        )
         label(canvas, "向上滑动以翻译", centerX, capsule.top - dp(18), 14f, muted, Paint.Align.CENTER, true)
         val close = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
         rounded(canvas, close, dp(19), tabBackground)
@@ -1253,6 +1279,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 answerDragStartScroll = answerScrollY
                 val hit = targets.lastOrNull { it.enabled && it.box.contains(event.x, event.y) }
                 activeTarget = hit
+                primaryPointerId = event.getPointerId(0)
+                if (hit != null) secondaryTouches[primaryPointerId] = hit
                 activeTargetCancelled = false
                 longPressTriggered = false
                 pressedBox = hit?.box
@@ -1362,7 +1390,25 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 if (target != null && !cancelled && target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
                     target.hapticFeedback?.let(::emitHaptic)
                     if (target.keySound) keySound.play(keyboardSoundVolume)
-                    target.action.invoke()
+                    if (pointerId == primaryPointerId && longPressTriggered) {
+                        target.releaseAction?.invoke()
+                    } else {
+                        target.action.invoke()
+                    }
+                }
+                if (pointerId == primaryPointerId) {
+                    removeCallbacks(repeatBackspace)
+                    removeCallbacks(longPressRunnable)
+                    repeatAction = null
+                    repeatHaptic = null
+                    activeTarget = null
+                    activeTargetCancelled = false
+                    primaryPointerId = MotionEvent.INVALID_POINTER_ID
+                    if (longPressTriggered) {
+                        longPressTriggered = false
+                        longPressVoiceBox = null
+                        animateHoldOverlay(show = false)
+                    }
                 }
                 return true
             }
@@ -1425,19 +1471,21 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 }
                 candidateVelocityTracker?.recycle()
                 candidateVelocityTracker = null
-                val active = activeTarget
-                val hit = targets.lastOrNull { it.enabled && it.box.contains(event.x, event.y) }
-                val releasedOnOriginalTarget = !activeTargetCancelled && sameBox(hit?.box, active?.box)
+                val pointerId = event.getPointerId(event.actionIndex)
+                val active = secondaryTouches.remove(pointerId) ?: activeTarget
+                val cancelled = cancelledSecondaryTouches.remove(pointerId) || activeTargetCancelled
+                val releasedOnOriginalTarget = !cancelled && active?.box?.contains(event.x, event.y) == true
                 postDelayed({ pressedBox = null; invalidate() }, 100L)
                 if (longPressTriggered) {
                     active?.releaseAction?.invoke()
                 } else if (releasedOnOriginalTarget) {
-                    hit?.hapticFeedback?.let(::emitHaptic)
-                    if (hit?.keySound == true) keySound.play(keyboardSoundVolume)
-                    hit?.action?.invoke()
+                    active?.hapticFeedback?.let(::emitHaptic)
+                    if (active?.keySound == true) keySound.play(keyboardSoundVolume)
+                    active?.action?.invoke()
                 }
                 activeTarget = null
                 activeTargetCancelled = false
+                primaryPointerId = MotionEvent.INVALID_POINTER_ID
                 longPressVoiceBox = null
                 animateHoldOverlay(show = false)
                 secondaryTouches.clear()
@@ -1453,6 +1501,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 activeTarget?.takeIf { longPressTriggered }?.releaseAction?.invoke()
                 activeTarget = null
                 activeTargetCancelled = false
+                primaryPointerId = MotionEvent.INVALID_POINTER_ID
                 longPressVoiceBox = null
                 animateHoldOverlay(show = false)
                 secondaryTouches.clear()

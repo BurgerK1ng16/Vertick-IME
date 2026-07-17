@@ -24,7 +24,9 @@ data class PinyinCandidate(
 data class PinyinSessionState(
     val preedit: String = "",
     val candidates: List<PinyinCandidate> = emptyList(),
-    val committedText: String? = null
+    val committedText: String? = null,
+    /** Internal code is retained so a T9 composition can survive an IME view rebuild. */
+    val rawComposition: String = preedit
 )
 
 /** A serialized librime session. Candidate ordering is owned by librime. */

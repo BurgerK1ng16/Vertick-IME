@@ -52,7 +52,7 @@ import com.weike.ime.data.PunctuationPreference
 import com.weike.ime.data.TypingDictionaryEntry
 import com.weike.ime.data.UsageStats
 import com.weike.ime.data.WritingStyle
-import com.weike.ime.ime.RimePinyinDecoder
+import com.weike.ime.ime.LocalPinyinDecoder
 import com.weike.ime.ime.WeikeInputMethodService
 import com.weike.ime.network.MimoTextPolisher
 import com.weike.ime.network.MimoApiConfig
@@ -467,10 +467,9 @@ class MainActivity : AppCompatActivity() {
         })
         addView(section("中文离线输入"))
         addView(card().apply {
-            addView(actionRow("Rime-Ice 完整词典", RimePinyinDecoder.DICTIONARY_VERSION) {})
+            addView(actionRow("离线拼音词典", LocalPinyinDecoder.DICTIONARY_VERSION) {})
             addDivider(this)
             addView(actionRow("清除候选学习数据", "保留专业词与打字词典") {
-                RimePinyinDecoder.requestClearLearnedData(this@MainActivity)
                 sendBroadcast(Intent(WeikeInputMethodService.ACTION_CLEAR_RIME_LEARNING).setPackage(packageName))
             })
         })
