@@ -1,7 +1,7 @@
 <p align="center">
   <img src="docs/images/app-icon.png" alt="Vertick logo" width="88" height="88" style="border-radius: 18px;" />
 </p>
-
+<h1 align="center">The project is currently in a fast iteration mode, so please make sure to check for updates!</h1>
 <h1 align="center">Vertick IME</h1>
 
 <p align="center">
@@ -14,7 +14,7 @@ Vertick IME is an open-source Chinese input method for Android 15 and later. It 
   <img src="https://edgeoneimg.cdn.sn/i/6a574692127f4_1784104594.webp" alt="Dictation and polishing in dark mode" width="49%" />
   <img src="https://edgeoneimg.cdn.sn/i/6a5746921c074_1784104594.webp" alt="Dictation and polishing in light mode" width="49%" />
 </p>
-##项目正处于快速迭代阶段，遇到问题请提出issues或检查更新
+
 ## Features and Privacy
 
 - Offline Pinyin candidates and on-device learning powered by Rime-Ice.
