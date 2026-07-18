@@ -687,6 +687,39 @@ class MainActivity : AppCompatActivity() {
             addView(subtitle("小米系统触感引擎"))
             addView(hapticControl)
             lifecycleScope.launch { hapticControl.setSelected(haptics.indexOf(container.settings.hapticStrength()).coerceAtLeast(0)) }
+            addDivider(this)
+            val closeButtonControl = SegmentedControl(this@MainActivity, listOf("关闭", "显示"), 0) { index ->
+                lifecycleScope.launch { container.settings.saveKeyboardCloseButtonEnabled(index == 1) }
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "收起键"
+                textSize = 18f
+                setTextColor(getColor(R.color.weike_text))
+                layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 14)
+            })
+            addView(closeButtonControl)
+            lifecycleScope.launch {
+                closeButtonControl.setSelected(if (container.settings.keyboardCloseButtonEnabled()) 1 else 0)
+            }
+            addDivider(this)
+            val candidateSizeLevels = (-3..3).toList()
+            val candidateSizeControl = SegmentedControl(
+                this@MainActivity,
+                listOf("12", "14", "16", "默认", "20", "22", "24"),
+                0
+            ) { index ->
+                lifecycleScope.launch { container.settings.saveCandidateTextSizeLevel(candidateSizeLevels[index]) }
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "候选词大小"
+                textSize = 18f
+                setTextColor(getColor(R.color.weike_text))
+                layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 14)
+            })
+            addView(candidateSizeControl)
+            lifecycleScope.launch {
+                candidateSizeControl.setSelected(container.settings.candidateTextSizeLevel() + 3)
+            }
         })
         addView(section("按键音效"))
         addView(card().apply {
@@ -714,6 +747,35 @@ class MainActivity : AppCompatActivity() {
             addView(layoutControl)
             lifecycleScope.launch {
                 layoutControl.setSelected(layouts.indexOf(container.settings.chineseKeyboardLayout()).coerceAtLeast(0))
+            }
+        })
+        addView(section("英文键盘"))
+        addView(card().apply {
+            val autoCapitalizeControl = SegmentedControl(this@MainActivity, listOf("关闭", "开启"), 0) { index ->
+                lifecycleScope.launch { container.settings.saveEnglishAutoCapitalize(index == 1) }
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "首字母自动大写"
+                textSize = 18f
+                setTextColor(getColor(R.color.weike_text))
+            })
+            addView(autoCapitalizeControl)
+            lifecycleScope.launch {
+                autoCapitalizeControl.setSelected(if (container.settings.englishAutoCapitalize()) 1 else 0)
+            }
+            addDivider(this)
+            val doubleSpaceControl = SegmentedControl(this@MainActivity, listOf("关闭", "开启"), 0) { index ->
+                lifecycleScope.launch { container.settings.saveDoubleSpacePeriod(index == 1) }
+            }
+            addView(TextView(this@MainActivity).apply {
+                text = "双击空格输入句号"
+                textSize = 18f
+                setTextColor(getColor(R.color.weike_text))
+                layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 14)
+            })
+            addView(doubleSpaceControl)
+            lifecycleScope.launch {
+                doubleSpaceControl.setSelected(if (container.settings.doubleSpacePeriod()) 1 else 0)
             }
         })
         addView(section("九宫格符号"))

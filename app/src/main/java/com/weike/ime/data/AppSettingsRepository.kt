@@ -29,6 +29,10 @@ class AppSettingsRepository(private val context: Context) {
     private val expressionOptimizationKey = booleanPreferencesKey("expression_optimization")
     private val keyboardThemeKey = stringPreferencesKey("keyboard_theme")
     private val keyboardSoundVolumeKey = floatPreferencesKey("keyboard_sound_volume")
+    private val keyboardCloseButtonKey = booleanPreferencesKey("keyboard_close_button")
+    private val candidateTextSizeLevelKey = intPreferencesKey("candidate_text_size_level")
+    private val englishAutoCapitalizeKey = booleanPreferencesKey("english_auto_capitalize")
+    private val doubleSpacePeriodKey = booleanPreferencesKey("double_space_period")
     private val historyRetentionKey = stringPreferencesKey("history_retention")
     private val keyboardModesKey = stringPreferencesKey("keyboard_modes")
     private val chineseKeyboardLayoutKey = stringPreferencesKey("chinese_keyboard_layout")
@@ -60,6 +64,19 @@ class AppSettingsRepository(private val context: Context) {
     }
     val keyboardSoundVolume = context.settingsDataStore.data.map { prefs ->
         (prefs[keyboardSoundVolumeKey] ?: DEFAULT_KEYBOARD_SOUND_VOLUME).coerceIn(0f, 1f)
+    }
+    val keyboardCloseButtonEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[keyboardCloseButtonKey] ?: true
+    }
+    val candidateTextSizeLevel = context.settingsDataStore.data.map { prefs ->
+        (prefs[candidateTextSizeLevelKey] ?: DEFAULT_CANDIDATE_TEXT_SIZE_LEVEL)
+            .coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
+    }
+    val englishAutoCapitalize = context.settingsDataStore.data.map { prefs ->
+        prefs[englishAutoCapitalizeKey] ?: true
+    }
+    val doubleSpacePeriod = context.settingsDataStore.data.map { prefs ->
+        prefs[doubleSpacePeriodKey] ?: false
     }
     val historyRetention = context.settingsDataStore.data.map { prefs ->
         runCatching { HistoryRetention.valueOf(prefs[historyRetentionKey].orEmpty()) }
@@ -134,6 +151,35 @@ class AppSettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { prefs -> prefs[keyboardSoundVolumeKey] = normalized }
     }
 
+    suspend fun keyboardCloseButtonEnabled(): Boolean = keyboardCloseButtonEnabled.first()
+
+    suspend fun saveKeyboardCloseButtonEnabled(enabled: Boolean) {
+        startupPreferences.edit().putBoolean(STARTUP_CLOSE_BUTTON, enabled).apply()
+        context.settingsDataStore.edit { prefs -> prefs[keyboardCloseButtonKey] = enabled }
+    }
+
+    suspend fun candidateTextSizeLevel(): Int = candidateTextSizeLevel.first()
+
+    suspend fun saveCandidateTextSizeLevel(level: Int) {
+        val normalized = level.coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
+        startupPreferences.edit().putInt(STARTUP_CANDIDATE_TEXT_SIZE_LEVEL, normalized).apply()
+        context.settingsDataStore.edit { prefs -> prefs[candidateTextSizeLevelKey] = normalized }
+    }
+
+    suspend fun englishAutoCapitalize(): Boolean = englishAutoCapitalize.first()
+
+    suspend fun saveEnglishAutoCapitalize(enabled: Boolean) {
+        startupPreferences.edit().putBoolean(STARTUP_ENGLISH_AUTO_CAPITALIZE, enabled).apply()
+        context.settingsDataStore.edit { prefs -> prefs[englishAutoCapitalizeKey] = enabled }
+    }
+
+    suspend fun doubleSpacePeriod(): Boolean = doubleSpacePeriod.first()
+
+    suspend fun saveDoubleSpacePeriod(enabled: Boolean) {
+        startupPreferences.edit().putBoolean(STARTUP_DOUBLE_SPACE_PERIOD, enabled).apply()
+        context.settingsDataStore.edit { prefs -> prefs[doubleSpacePeriodKey] = enabled }
+    }
+
     suspend fun historyRetention(): HistoryRetention = historyRetention.first()
 
     suspend fun saveHistoryRetention(retention: HistoryRetention) {
@@ -175,7 +221,15 @@ class AppSettingsRepository(private val context: Context) {
         } ?: HapticStrength.MEDIUM
         val volume = startupPreferences.getFloat(STARTUP_SOUND_VOLUME, DEFAULT_KEYBOARD_SOUND_VOLUME)
             .coerceIn(0f, 1f)
-        return KeyboardStartupState(theme, layout, modes, haptic, volume, startupPreferences.contains(STARTUP_THEME))
+        val closeButtonEnabled = startupPreferences.getBoolean(STARTUP_CLOSE_BUTTON, true)
+        val candidateTextSizeLevel = startupPreferences.getInt(STARTUP_CANDIDATE_TEXT_SIZE_LEVEL, DEFAULT_CANDIDATE_TEXT_SIZE_LEVEL)
+            .coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
+        val englishAutoCapitalize = startupPreferences.getBoolean(STARTUP_ENGLISH_AUTO_CAPITALIZE, true)
+        val doubleSpacePeriod = startupPreferences.getBoolean(STARTUP_DOUBLE_SPACE_PERIOD, false)
+        return KeyboardStartupState(
+            theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
+            englishAutoCapitalize, doubleSpacePeriod, startupPreferences.contains(STARTUP_THEME)
+        )
     }
 
     /** A one-time upgrade bridge for an IME recreated before DataStore emits. */
@@ -189,8 +243,19 @@ class AppSettingsRepository(private val context: Context) {
         val haptic = HapticStrength.entries.firstOrNull { it.storedValue == prefs[hapticStrengthKey] }
             ?: HapticStrength.MEDIUM
         val volume = (prefs[keyboardSoundVolumeKey] ?: DEFAULT_KEYBOARD_SOUND_VOLUME).coerceIn(0f, 1f)
-        cacheKeyboardStartupState(theme, layout, modes, haptic, volume)
-        KeyboardStartupState(theme, layout, modes, haptic, volume, true)
+        val closeButtonEnabled = prefs[keyboardCloseButtonKey] ?: true
+        val candidateTextSizeLevel = (prefs[candidateTextSizeLevelKey] ?: DEFAULT_CANDIDATE_TEXT_SIZE_LEVEL)
+            .coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
+        val englishAutoCapitalize = prefs[englishAutoCapitalizeKey] ?: true
+        val doubleSpacePeriod = prefs[doubleSpacePeriodKey] ?: false
+        cacheKeyboardStartupState(
+            theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
+            englishAutoCapitalize, doubleSpacePeriod
+        )
+        KeyboardStartupState(
+            theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
+            englishAutoCapitalize, doubleSpacePeriod, true
+        )
     }
 
     fun cacheKeyboardStartupState(
@@ -198,7 +263,11 @@ class AppSettingsRepository(private val context: Context) {
         layout: ChineseKeyboardLayout? = null,
         modes: List<KeyboardModePreference>? = null,
         haptic: HapticStrength? = null,
-        soundVolume: Float? = null
+        soundVolume: Float? = null,
+        closeButtonEnabled: Boolean? = null,
+        candidateTextSizeLevel: Int? = null,
+        englishAutoCapitalize: Boolean? = null,
+        doubleSpacePeriod: Boolean? = null
     ) {
         startupPreferences.edit().apply {
             theme?.let { putString(STARTUP_THEME, it.name) }
@@ -206,6 +275,10 @@ class AppSettingsRepository(private val context: Context) {
             modes?.let { putString(STARTUP_MODES, it.joinToString(",") { mode -> mode.name }) }
             haptic?.let { putInt(STARTUP_HAPTIC, it.storedValue) }
             soundVolume?.let { putFloat(STARTUP_SOUND_VOLUME, it.coerceIn(0f, 1f)) }
+            closeButtonEnabled?.let { putBoolean(STARTUP_CLOSE_BUTTON, it) }
+            candidateTextSizeLevel?.let { putInt(STARTUP_CANDIDATE_TEXT_SIZE_LEVEL, it.coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)) }
+            englishAutoCapitalize?.let { putBoolean(STARTUP_ENGLISH_AUTO_CAPITALIZE, it) }
+            doubleSpacePeriod?.let { putBoolean(STARTUP_DOUBLE_SPACE_PERIOD, it) }
         }.apply()
     }
 
@@ -323,9 +396,16 @@ class AppSettingsRepository(private val context: Context) {
         private const val STARTUP_MODES = "modes"
         private const val STARTUP_HAPTIC = "haptic"
         private const val STARTUP_SOUND_VOLUME = "sound_volume"
+        private const val STARTUP_CLOSE_BUTTON = "close_button"
+        private const val STARTUP_CANDIDATE_TEXT_SIZE_LEVEL = "candidate_text_size_level"
+        private const val STARTUP_ENGLISH_AUTO_CAPITALIZE = "english_auto_capitalize"
+        private const val STARTUP_DOUBLE_SPACE_PERIOD = "double_space_period"
         private const val SECURE_ASR_KEY = "asr_api_key"
         private const val SECURE_TEXT_KEY = "text_api_key"
         const val DEFAULT_KEYBOARD_SOUND_VOLUME = .45f
+        const val MIN_CANDIDATE_TEXT_SIZE_LEVEL = -3
+        const val DEFAULT_CANDIDATE_TEXT_SIZE_LEVEL = 0
+        const val MAX_CANDIDATE_TEXT_SIZE_LEVEL = 3
         const val MAX_NINE_KEY_SYMBOLS = 16
         val DEFAULT_NINE_KEY_SYMBOLS = listOf("，", "。", "？", "！", "…", "：", "、", "～")
         val DEFAULT_KEYBOARD_MODES = listOf(
@@ -352,5 +432,9 @@ data class KeyboardStartupState(
     val modes: List<KeyboardModePreference>,
     val haptic: HapticStrength,
     val soundVolume: Float,
+    val closeButtonEnabled: Boolean,
+    val candidateTextSizeLevel: Int,
+    val englishAutoCapitalize: Boolean,
+    val doubleSpacePeriod: Boolean,
     val isSeeded: Boolean
 )

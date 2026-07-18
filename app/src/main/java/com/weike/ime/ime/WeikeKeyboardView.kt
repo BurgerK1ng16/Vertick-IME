@@ -40,6 +40,7 @@ interface KeyboardActions {
     fun setLongPressTranslation(selected: Boolean)
     fun finishVoice()
     fun cancelVoice()
+    fun closeKeyboard()
     fun dismissAnswer()
     fun pasteClipboard(entry: ClipboardEntry)
     fun deleteClipboard(entry: ClipboardEntry)
@@ -50,6 +51,7 @@ interface KeyboardActions {
     fun chooseCandidate(candidate: PinyinCandidate)
     fun chooseEnglishCandidate(value: String)
     fun commitEnglishComposition(addSpace: Boolean)
+    fun pressTextSpace(pinyin: Boolean)
     fun backspace()
     fun enter()
     fun newline()
@@ -112,6 +114,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var hapticStrength = HapticStrength.MEDIUM
     private var keyboardSoundVolume = .45f
     private var keyboardTheme = KeyboardTheme.DARK
+    private var showCloseButton = true
+    private var candidateTextSizeLevel = 0
+    private var englishAutoCapitalize = true
+    private var englishAutoCapitalizeNext = false
+    private var automaticUppercase = false
     private var meter = 0f
     private var voiceMorph = 0f
     private var modeIndicator = 0f
@@ -215,7 +222,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         clipboardEntries: List<ClipboardEntry> = this.clipboardEntries,
         pinyinNineKey: Boolean = this.pinyinNineKey,
         symbolsUseEnglish: Boolean = this.symbolsUseEnglish,
-        nineKeySymbols: List<String> = this.nineKeySymbols
+        nineKeySymbols: List<String> = this.nineKeySymbols,
+        showCloseButton: Boolean = this.showCloseButton,
+        candidateTextSizeLevel: Int = this.candidateTextSizeLevel,
+        englishAutoCapitalize: Boolean = this.englishAutoCapitalize,
+        englishAutoCapitalizeNext: Boolean = this.englishAutoCapitalizeNext
     ) {
         val normalizedModes = modeOptions.distinct().filter { it != KeyboardMode.SYMBOLS }
             .ifEmpty { listOf(KeyboardMode.PINYIN) }
@@ -267,6 +278,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.symbolsUseEnglish = symbolsUseEnglish
         this.nineKeySymbols = nineKeySymbols
         this.keyboardTheme = keyboardTheme
+        this.showCloseButton = showCloseButton
+        this.candidateTextSizeLevel = candidateTextSizeLevel.coerceIn(-3, 3)
+        this.englishAutoCapitalize = englishAutoCapitalize
+        this.englishAutoCapitalizeNext = englishAutoCapitalizeNext
+        if (targetMode == KeyboardMode.ENGLISH && englishBuffer.isBlank() && englishAutoCapitalize && englishAutoCapitalizeNext) {
+            if (!uppercase) {
+                uppercase = true
+                automaticUppercase = true
+            }
+        } else if (automaticUppercase && (!englishAutoCapitalize || !englishAutoCapitalizeNext || englishBuffer.isNotBlank())) {
+            uppercase = false
+            automaticUppercase = false
+        }
         this.sensitive = sensitive
         this.hapticStrength = hapticStrength
         this.keyboardSoundVolume = keyboardSoundVolume
@@ -412,16 +436,33 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             canvas.drawBitmap(logo, null, RectF(dp(13), logoTop, dp(13) + logoWidth, logoTop + logoHeight), paint)
         }
 
+        // Landscape supplies this control from the floating panel itself.
+        // Portrait draws it here in the regular IME surface.
+        if (showCloseButton && !isLandscape()) {
+            val closeKeyboard = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
+            rounded(canvas, closeKeyboard, dp(19), tabBackground)
+            lucide(canvas, R.drawable.ic_lucide_chevron_down, closeKeyboard.centerX(), closeKeyboard.centerY(), dp(18), muted)
+            target(closeKeyboard, hapticFeedback = HapticFeedbackConstants.GESTURE_END) { actions.closeKeyboard() }
+        }
+
         if (voiceState == VoiceUiState.Listening) {
-            val close = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
+            // The floating landscape panel owns the far-right close control.
+            // Keep the recording cancel action immediately to its left.
+            val closeRight = if (showCloseButton) width - dp(54) else width - dp(8)
+            val close = RectF(closeRight - dp(38), dp(10), closeRight, dp(48))
             rounded(canvas, close, dp(19), tabBackground)
             lucide(canvas, R.drawable.ic_lucide_x, close.centerX(), close.centerY(), dp(17), muted)
             target(close, hapticFeedback = HapticFeedbackConstants.GESTURE_END) { actions.cancelVoice() }
             return
         }
 
-        val tabWidth = dp(52) * availableModes.size
-        val tabs = RectF(width - dp(8) - tabWidth, dp(10), width - dp(8), dp(48))
+        val tabCellWidth = if (isLandscape()) dp(44) else dp(52)
+        val tabWidth = tabCellWidth * availableModes.size
+        // In landscape the outer floating panel supplies a close button on the
+        // right. Keep a compact selector immediately to its left.
+        val tabsRight = if (showCloseButton) width - dp(54) else width - dp(8)
+        val tabsLeft = tabsRight - tabWidth
+        val tabs = RectF(tabsLeft, dp(10), tabsRight, dp(48))
         rounded(canvas, tabs, dp(20), tabBackground)
         val cell = tabs.width() / availableModes.size
         val selected = availableModes.indexOf(topModeFor(mode, availableModes))
@@ -644,7 +685,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             true
         )
         label(canvas, "向上滑动以翻译", centerX, capsule.top - dp(18), 14f, muted, Paint.Align.CENTER, true)
-        val close = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
+        val closeRight = if (showCloseButton) width - dp(54) else width - dp(8)
+        val close = RectF(closeRight - dp(38), dp(10), closeRight, dp(48))
         rounded(canvas, close, dp(19), tabBackground)
         lucide(canvas, R.drawable.ic_lucide_x, close.centerX(), close.centerY(), dp(17), muted)
         target(close, hapticFeedback = HapticFeedbackConstants.GESTURE_END) { actions.cancelVoice() }
@@ -768,8 +810,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 if (letters == "'") {
                     label(canvas, letters, box.centerX(), box.centerY() + dp(7), keyLetterSize(25f), white, Paint.Align.CENTER, true)
                 } else {
-                    label(canvas, letters, box.centerX(), box.centerY() - dp(3), keyLetterSize(17f), white, Paint.Align.CENTER, true)
-                    label(canvas, code, box.centerX(), box.centerY() + dp(17), keyLetterSize(12f), muted, Paint.Align.CENTER)
+                    val letterBaseline = if (isLandscape()) box.centerY() + dp(6) else box.centerY() - dp(3)
+                    label(canvas, letters, box.centerX(), letterBaseline, keyLetterSize(17f), white, Paint.Align.CENTER, true)
+                    if (!isLandscape()) {
+                        label(canvas, code, box.centerX(), box.centerY() + dp(17), keyLetterSize(12f), muted, Paint.Align.CENTER)
+                    }
                 }
                 target(box, keySound = true) { actions.typePinyin(code) }
             }
@@ -795,9 +840,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         label(canvas, "拼", space.right - dp(11), space.centerY() + dp(10), 14f, muted, Paint.Align.RIGHT, true)
         lucide(canvas, R.drawable.ic_lucide_move_right, enter.centerX(), enter.centerY(), dp(21), actionIcon)
         target(symbols, hapticFeedback = null) { actions.toggleSymbols() }
-        target(space, keySound = true) {
-            if (pinyinCandidates.isNotEmpty()) actions.chooseCandidate(pinyinCandidates.first())
-        }
+        target(space, keySound = true) { actions.pressTextSpace(true) }
         target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
     }
 
@@ -826,9 +869,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         pinyin: Boolean
     ) {
         val y = dp(11)
-        val strip = RectF(dp(5), y, width - dp(5), y + dp(37))
-        candidateStrip = RectF(0f, y - dp(4), width.toFloat(), y + dp(42))
-        paint.textSize = dp(18)
+        val textSize = (18 + candidateTextSizeLevel * 2).toFloat()
+        val rowHeight = maxOf(dp(37), dp(textSize.toInt() + 16))
+        val strip = RectF(dp(5), y, width - dp(5), y + rowHeight)
+        candidateStrip = RectF(0f, y - dp(4), width.toFloat(), y + rowHeight + dp(5))
+        paint.textSize = dp(textSize.toInt())
         paint.typeface = Typeface.DEFAULT_BOLD
         if (candidateItems.isEmpty()) {
             label(canvas, if (pinyin) "正在匹配…" else "正在推荐…", strip.left + dp(8), strip.centerY() + dp(7), 14f, muted, Paint.Align.LEFT)
@@ -842,11 +887,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         canvas.clipRect(strip)
         var cursor = strip.left - candidateScrollX
         candidateItems.forEachIndexed { index, candidate ->
-            val box = RectF(cursor, y, cursor + widths[index], y + dp(37))
+            val box = RectF(cursor, y, cursor + widths[index], y + rowHeight)
             cursor += widths[index] + dp(7)
             if (box.right < strip.left || box.left > strip.right) return@forEachIndexed
             if (index == 0) rounded(canvas, box, dp(7), key)
-            label(canvas, candidate.text, box.centerX(), box.centerY() + dp(7), 18f, white, Paint.Align.CENTER, true)
+            val baseline = box.centerY() - (paint.ascent() + paint.descent()) / 2f
+            label(canvas, candidate.text, box.centerX(), baseline, textSize, white, Paint.Align.CENTER, true)
             val visibleBox = RectF(box).apply { intersect(strip) }
             target(visibleBox, keySound = true) { if (pinyin) actions.chooseCandidate(candidate) else actions.chooseEnglishCandidate(candidate.text) }
         }
@@ -861,7 +907,16 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             key(canvas, box)
             val output = if (pinyin || uppercase) character.uppercaseChar().toString() else character.toString()
             label(canvas, output, box.centerX(), box.centerY() + dp(10), keyLetterSize(if (pinyin) 23f else 25f), white, Paint.Align.CENTER)
-            target(box, keySound = true) { if (pinyin) actions.typePinyin(character.toString()) else actions.typeEnglishLetter(output) }
+            target(box, keySound = true) {
+                if (pinyin) actions.typePinyin(character.toString()) else {
+                    actions.typeEnglishLetter(output)
+                    if (automaticUppercase) {
+                        uppercase = false
+                        automaticUppercase = false
+                        invalidate()
+                    }
+                }
+            }
         }
     }
 
@@ -876,14 +931,29 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         key(canvas, shift)
         val shiftIcon = if (!pinyin && uppercase) R.drawable.ic_lucide_arrow_big_up_dash else R.drawable.ic_lucide_arrow_big_up
         lucide(canvas, shiftIcon, shift.centerX(), shift.centerY(), dp(20), white)
-        target(shift, keySound = true) { if (pinyin) actions.typePinyin("'") else { uppercase = !uppercase; invalidate() } }
+        target(shift, keySound = true) {
+            if (pinyin) actions.typePinyin("'") else {
+                uppercase = !uppercase
+                automaticUppercase = false
+                invalidate()
+            }
+        }
         chars.forEachIndexed { index, character ->
             val x = edge + side + gap + index * (keyWidth + gap)
             val box = RectF(x, y, x + keyWidth, y + h)
             key(canvas, box)
             val output = if (pinyin || uppercase) character.uppercaseChar().toString() else character.toString()
             label(canvas, output, box.centerX(), box.centerY() + dp(10), keyLetterSize(if (pinyin) 23f else 25f), white, Paint.Align.CENTER)
-            target(box, keySound = true) { if (pinyin) actions.typePinyin(character.toString()) else actions.typeEnglishLetter(output) }
+            target(box, keySound = true) {
+                if (pinyin) actions.typePinyin(character.toString()) else {
+                    actions.typeEnglishLetter(output)
+                    if (automaticUppercase) {
+                        uppercase = false
+                        automaticUppercase = false
+                        invalidate()
+                    }
+                }
+            }
         }
         val back = RectF(edge + rowWidth - delete, y, edge + rowWidth, y + h)
         key(canvas, back)
@@ -905,11 +975,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         label(canvas, if (pinyin) "\u62fc" else "EN", space.right - dp(11), space.centerY() + dp(10), 14f, muted, Paint.Align.RIGHT, true)
         lucide(canvas, R.drawable.ic_lucide_move_right, enter.centerX(), enter.centerY(), dp(21), actionIcon)
         target(number, hapticFeedback = null) { actions.toggleSymbols() }
-        target(space, keySound = true) {
-            if (pinyin && pinyinCandidates.isNotEmpty()) actions.chooseCandidate(pinyinCandidates.first())
-            else if (!pinyin && englishBuffer.isNotBlank()) actions.commitEnglishComposition(true)
-            else actions.typeEnglish(" ")
-        }
+        target(space, keySound = true) { actions.pressTextSpace(pinyin) }
         target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
     }
 

@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -66,6 +67,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var overlayHost: FrameLayout? = null
     private var overlayWindowManager: WindowManager? = null
     private var overlayLayoutParams: WindowManager.LayoutParams? = null
+    private var overlayContext: Context? = null
     private var overlayPanel: FloatingKeyboardPanel? = null
     private lateinit var pinyinDecoder: LocalPinyinDecoder
     private lateinit var jieba: JiebaSegmenter
@@ -82,6 +84,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var punctuation = PunctuationPreference.SMART
     private var hapticStrength = HapticStrength.MEDIUM
     private var keyboardSoundVolume = AppSettingsRepository.DEFAULT_KEYBOARD_SOUND_VOLUME
+    private var keyboardCloseButtonEnabled = true
+    private var candidateTextSizeLevel = AppSettingsRepository.DEFAULT_CANDIDATE_TEXT_SIZE_LEVEL
+    private var englishAutoCapitalize = true
+    private var doubleSpacePeriod = false
     private var keyboardTheme = KeyboardTheme.DARK
     private var keyboardThemePreference = KeyboardTheme.DARK
     private var expressionOptimization = false
@@ -105,6 +111,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var lastSyncedTypingDictionary: List<TypingDictionaryEntry> = emptyList()
     private var englishBuffer = ""
     private var englishCandidates: List<PinyinCandidate> = emptyList()
+    private var lastTextSpaceAtMs = 0L
+    private var lastTextSpaceConnection: InputConnection? = null
     private var clipboardEntries: List<ClipboardEntry> = emptyList()
     private var lastClipboardContent = ""
     private var clipboardHistoryEnabled = false
@@ -148,6 +156,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         visibleKeyboardModes = startup.modes.map(::toKeyboardMode).distinct()
         hapticStrength = startup.haptic
         keyboardSoundVolume = startup.soundVolume
+        keyboardCloseButtonEnabled = startup.closeButtonEnabled
+        candidateTextSizeLevel = startup.candidateTextSizeLevel
+        englishAutoCapitalize = startup.englishAutoCapitalize
+        doubleSpacePeriod = startup.doubleSpacePeriod
         if (!isConfiguredMode(mode) && mode != KeyboardMode.SYMBOLS) {
             mode = initialModeFor(visibleKeyboardModes.firstOrNull() ?: KeyboardMode.TEXT)
         }
@@ -197,6 +209,33 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 keyboardSoundVolume = volume
                 container.settings.cacheKeyboardStartupState(soundVolume = volume)
                 render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.keyboardCloseButtonEnabled.collect { enabled ->
+                keyboardCloseButtonEnabled = enabled
+                container.settings.cacheKeyboardStartupState(closeButtonEnabled = enabled)
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.candidateTextSizeLevel.collect { level ->
+                candidateTextSizeLevel = level
+                container.settings.cacheKeyboardStartupState(candidateTextSizeLevel = level)
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.englishAutoCapitalize.collect { enabled ->
+                englishAutoCapitalize = enabled
+                container.settings.cacheKeyboardStartupState(englishAutoCapitalize = enabled)
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.doubleSpacePeriod.collect { enabled ->
+                doubleSpacePeriod = enabled
+                container.settings.cacheKeyboardStartupState(doubleSpacePeriod = enabled)
             }
         }
         serviceScope.launch {
@@ -339,9 +378,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         val maxPanelHeight = minOf(dp(330), (screenHeight * .60f).toInt())
         val panelHeight = minOf(maxPanelHeight, ((screenWidth - dp(32)) / 1.7f).toInt())
         val panelWidth = (panelHeight * 1.7f).toInt()
+        val windowContext = createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
         val panel = FloatingKeyboardPanel(
-            context = this,
+            context = windowContext,
             canDrag = { pinyinBuffer.isBlank() && englishBuffer.isBlank() },
+            showCloseButton = keyboardCloseButtonEnabled,
             onClose = ::closeLandscapeKeyboard,
             onMove = ::moveLandscapeKeyboard
         )
@@ -362,12 +403,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             title = "Vertick Landscape Keyboard"
         }
         runCatching {
-            val manager = getSystemService(WindowManager::class.java)
+            val manager = windowContext.getSystemService(WindowManager::class.java)
             manager.addView(panel, params)
             overlayHost = panel
             overlayPanel = panel
             overlayWindowManager = manager
             overlayLayoutParams = params
+            overlayContext = windowContext
             Log.d(TAG, "Landscape overlay attached")
             // Keep only the overlay at the top level. The standard IME window
             // would otherwise reserve bottom insets and push the editor up.
@@ -396,6 +438,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         overlayPanel = null
         overlayWindowManager = null
         overlayLayoutParams = null
+        overlayContext = null
     }
 
     private fun moveLandscapeKeyboard(x: Int, y: Int) {
@@ -421,6 +464,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private inner class FloatingKeyboardPanel(
         context: Context,
         private val canDrag: () -> Boolean,
+        private val showCloseButton: Boolean,
         private val onClose: () -> Unit,
         private val onMove: (Int, Int) -> Unit
     ) : FrameLayout(context) {
@@ -435,16 +479,36 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             setWillNotDraw(false)
             clipToOutline = false
             addView(keyboardHost, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-            addView(ImageView(context).apply {
-                setImageResource(R.drawable.ic_lucide_x)
-                setColorFilter(if (keyboardTheme == KeyboardTheme.DARK) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
-                setPadding(dp(9), dp(9), dp(9), dp(9))
-                contentDescription = "Close floating keyboard"
-                setOnClickListener { onClose() }
-            }, LayoutParams(dp(36), dp(36), android.view.Gravity.TOP or android.view.Gravity.END).apply {
-                topMargin = dp(7)
-                marginEnd = dp(7)
-            })
+            if (showCloseButton) {
+                addView(ImageView(context).apply {
+                    setImageResource(R.drawable.ic_lucide_chevron_down)
+                    // Match the unselected icons in the keyboard's mode capsule.
+                    setColorFilter(
+                        if (keyboardTheme == KeyboardTheme.DARK) {
+                            android.graphics.Color.rgb(190, 190, 192)
+                        } else {
+                            android.graphics.Color.rgb(105, 105, 112)
+                        }
+                    )
+                    setPadding(dp(9), dp(9), dp(9), dp(9))
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = dp(19).toFloat()
+                        setColor(
+                            if (keyboardTheme == KeyboardTheme.DARK) {
+                                android.graphics.Color.rgb(44, 44, 46)
+                            } else {
+                                android.graphics.Color.rgb(235, 235, 239)
+                            }
+                        )
+                    }
+                    contentDescription = "Hide floating keyboard"
+                    setOnClickListener { onClose() }
+                }, LayoutParams(dp(38), dp(38), android.view.Gravity.TOP or android.view.Gravity.END).apply {
+                    topMargin = dp(10)
+                    marginEnd = dp(7)
+                })
+            }
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -539,12 +603,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             expressionOptimization = container.settings.expressionOptimizationEnabled()
             render()
         }
-        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            // A new editor connection is the most reliable re-open signal on
-            // HyperOS after its normal IME window has been hidden.
-            ensureKeyboard()
-            scheduleLandscapeOverlay(80L)
-        }
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -555,16 +613,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         if (pinyinBuffer.isNotBlank()) updateComposingText(pinyinBuffer)
         else if (englishBuffer.isNotBlank()) updateComposingText(englishBuffer)
         if (::keyboard.isInitialized) keyboard.requestLayout()
-        scheduleLandscapeOverlay()
         render()
     }
 
     override fun onShowInputRequested(flags: Int, configChange: Boolean): Boolean {
         val accepted = super.onShowInputRequested(flags, configChange)
-        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            // HyperOS often keeps its regular IME window hidden in landscape.
-            // Recreate our independent overlay whenever the user focuses a
-            // field after explicitly closing the previous floating keyboard.
+        if (!configChange && resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            // Only a fresh request from the focused editor may open the floating
+            // keyboard. Rotation, shade expansion and window recreation also
+            // reach the IME lifecycle, but must never summon an overlay.
             ensureKeyboard()
             scheduleLandscapeOverlay(80L)
         }
@@ -573,7 +630,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun onWindowShown() {
         super.onWindowShown()
-        if (::keyboard.isInitialized) scheduleLandscapeOverlay()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -634,7 +690,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             // above the app after the user returns to portrait.
             dismissLandscapeOverlay()
         } else {
-            scheduleLandscapeOverlay()
+            // A delayed task posted before rotation would otherwise create an
+            // overlay even though the user has not focused an editor in the
+            // new orientation.
+            mainHandler.removeCallbacks(landscapeOverlayRunnable)
         }
         render()
     }
@@ -670,12 +729,20 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         if (this.mode != mode && (voiceState != VoiceUiState.Idle || activeVoiceMode != null || rawTranscript.isNotBlank())) {
             cancelActiveVoiceSession()
         }
-        if (this.mode == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) {
+        if (this.mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotBlank()) {
             enqueuePinyin {
                 commitCurrentPinyin()
                 applyMode(mode)
             }
         } else applyMode(mode)
+    }
+
+    override fun closeKeyboard() {
+        if (voiceState != VoiceUiState.Idle || activeVoiceMode != null || rawTranscript.isNotBlank()) {
+            cancelActiveVoiceSession()
+        }
+        if (isLandscapeOverlayActive()) dismissLandscapeOverlay()
+        requestHideSelf(0)
     }
 
     private fun applyMode(nextMode: KeyboardMode) {
@@ -1213,7 +1280,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun typeEnglish(value: String) {
-        if (mode == KeyboardMode.SYMBOLS && modeBeforeSymbols == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) {
+        if (value != " " || mode == KeyboardMode.SYMBOLS) resetDoubleSpacePeriod()
+        if (mode == KeyboardMode.SYMBOLS && modeBeforeSymbols == KeyboardMode.PINYIN && pinyinRawBuffer.isNotBlank()) {
             enqueuePinyin {
                 commitCurrentPinyin()
                 currentInputConnection?.commitText(value, 1)
@@ -1225,6 +1293,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun typeEnglishLetter(value: String) {
+        resetDoubleSpacePeriod()
         englishBuffer += value
         englishCandidates = EnglishCandidateEngine.candidates(englishBuffer)
         updateComposingText(englishBuffer)
@@ -1250,6 +1319,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun chooseEnglishCandidate(value: String) {
+        resetDoubleSpacePeriod()
         currentInputConnection?.commitText(value, 1)
         recordEnglishSelection(value)
         englishBuffer = ""
@@ -1259,6 +1329,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun commitEnglishComposition(addSpace: Boolean) {
+        if (!addSpace) resetDoubleSpacePeriod()
         val value = englishCandidates.firstOrNull()?.text ?: englishBuffer
         if (value.isNotBlank()) {
             currentInputConnection?.commitText(value, 1)
@@ -1271,8 +1342,23 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         render()
     }
 
+    override fun pressTextSpace(pinyin: Boolean) {
+        if (pinyin && pinyinCandidates.isNotEmpty()) {
+            chooseCandidate(pinyinCandidates.first())
+            resetDoubleSpacePeriod()
+            return
+        }
+        if (!pinyin && englishBuffer.isNotBlank()) {
+            commitEnglishComposition(true)
+            markTextSpace()
+            return
+        }
+        insertTextSpace(pinyin)
+    }
+
     override fun backspace() {
-        if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
+        resetDoubleSpacePeriod()
+        if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
             pendingPinyinMutations += 1
             enqueuePinyin {
                 try {
@@ -1292,7 +1378,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun enter() {
-        if (mode == KeyboardMode.PINYIN && (pinyinBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
+        if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
             enqueuePinyin { commitRawPinyin() }
         } else {
             finishCompositionThen { currentInputConnection?.performEditorAction(EditorInfo.IME_ACTION_SEND) }
@@ -1304,7 +1390,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun finishCompositionThen(action: () -> Unit) {
-        if (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotEmpty()) {
+        if (mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotEmpty()) {
             enqueuePinyin {
                 commitCurrentPinyin()
                 action()
@@ -1325,7 +1411,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             }
             render()
         }
-        if (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) enqueuePinyin {
+        if (mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotBlank()) enqueuePinyin {
             commitCurrentPinyin()
             toggle()
         } else toggle()
@@ -1342,9 +1428,43 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 englishBuffer, englishCandidates, rawTranscript, sensitiveField, hapticStrength,
                 pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
                 clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
-                modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols
+                modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols, keyboardCloseButtonEnabled,
+                candidateTextSizeLevel, englishAutoCapitalize, shouldAutoCapitalizeEnglish()
             )
         }
+    }
+
+    private fun shouldAutoCapitalizeEnglish(): Boolean {
+        if (!englishAutoCapitalize || mode != KeyboardMode.ENGLISH || englishBuffer.isNotBlank()) return false
+        val preceding = currentInputConnection?.getTextBeforeCursor(32, 0)?.toString()?.trimEnd().orEmpty()
+        return preceding.isBlank() || preceding.lastOrNull() in AUTO_CAPITALIZE_AFTER
+    }
+
+    private fun insertTextSpace(pinyin: Boolean) {
+        val connection = currentInputConnection ?: return
+        val now = SystemClock.elapsedRealtime()
+        val shouldInsertPeriod = doubleSpacePeriod && connection === lastTextSpaceConnection &&
+            now - lastTextSpaceAtMs <= DOUBLE_SPACE_PERIOD_WINDOW_MS
+        if (shouldInsertPeriod) {
+            connection.deleteSurroundingText(1, 0)
+            connection.commitText(if (pinyin) "。" else ". ", 1)
+            resetDoubleSpacePeriod()
+        } else {
+            connection.commitText(" ", 1)
+            lastTextSpaceAtMs = now
+            lastTextSpaceConnection = connection
+        }
+        render()
+    }
+
+    private fun markTextSpace() {
+        lastTextSpaceAtMs = SystemClock.elapsedRealtime()
+        lastTextSpaceConnection = currentInputConnection
+    }
+
+    private fun resetDoubleSpacePeriod() {
+        lastTextSpaceAtMs = 0L
+        lastTextSpaceConnection = null
     }
 
     private fun toKeyboardMode(preference: KeyboardModePreference): KeyboardMode = when (preference) {
@@ -1406,13 +1526,17 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitRawPinyin() {
-        val raw = pinyinDecoder.currentState().preedit.ifBlank { pinyinBuffer }
+        val state = pinyinDecoder.currentState()
+        val raw = state.rawComposition
+        val committed = if (raw.all(Char::isDigit)) {
+            state.candidates.firstOrNull()?.text.orEmpty()
+        } else state.preedit.ifBlank { pinyinBuffer }
         pinyinDecoder.clear()
         pinyinBuffer = ""
         pinyinRawBuffer = ""
         pinyinCandidates = emptyList()
         updateComposingText("")
-        if (raw.isNotBlank()) currentInputConnection?.commitText(raw, 1)
+        if (committed.isNotBlank()) currentInputConnection?.commitText(committed, 1)
         render()
     }
 
@@ -1601,6 +1725,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private val INPUT_UNIT_PATTERN = Regex("[\\u4E00-\\u9FFF]|[A-Za-z]+(?:['-][A-Za-z]+)*|\\d+(?:[.,]\\d+)?")
         private const val MAX_CLIPBOARD_CONTENT_LENGTH = 4_096
         private const val INPUT_VIEW_RECOVERY_WINDOW_MS = 5_000L
+        private const val DOUBLE_SPACE_PERIOD_WINDOW_MS = 350L
+        private val AUTO_CAPITALIZE_AFTER = setOf('.', '!', '?', '。', '！', '？', '\n')
         private const val LANDSCAPE_OVERLAY_HEIGHT_DP = 258
         private const val IME_STATE_PREFERENCES = "ime_view_state"
         private const val KEY_RETAINED_KEYBOARD_MODE = "retained_keyboard_mode"

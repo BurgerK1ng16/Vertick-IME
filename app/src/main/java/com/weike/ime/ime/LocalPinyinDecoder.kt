@@ -25,6 +25,9 @@ class LocalPinyinDecoder(context: Context) {
     private val index = AtomicReference<PrebuiltPinyinIndex?>(null)
     private val lookupCache = ConcurrentHashMap<String, List<RankedText>>()
     private val prefixCodeCache = ConcurrentHashMap<String, List<RankedCode>>()
+    private val t9SegmentationCache = ConcurrentHashMap<String, List<List<String>>>()
+    private val t9SyllablesByCode = AtomicReference<Map<String, List<String>>>(emptyMap())
+    private val coreT9Index by lazy { buildT9Index(CORE_PHRASES) }
 
     @Volatile var isReady: Boolean = true
         private set
@@ -39,6 +42,7 @@ class LocalPinyinDecoder(context: Context) {
         if (index.get() == null) {
             index.set(PrebuiltPinyinIndex.open(appContext))
             readingByCharacter.set(loadReadings())
+            t9SyllablesByCode.set(emptyMap())
         }
         syncProfessionalTerms(terms, typingDictionary)
         return true
@@ -124,6 +128,8 @@ class LocalPinyinDecoder(context: Context) {
     suspend fun shutdown() {
         lookupCache.clear()
         prefixCodeCache.clear()
+        t9SegmentationCache.clear()
+        t9SyllablesByCode.set(emptyMap())
     }
 
     fun pinyinCodeForTerm(term: String, hint: String): String {
@@ -159,6 +165,27 @@ class LocalPinyinDecoder(context: Context) {
             .filter { matchesCode(query, it.code) || matchesCode(query, initialsFor(it.code)) }
             .sortedByDescending { it.weight }
             .forEach { add(it.text, it.weight) }
+
+        if (query.all(Char::isDigit)) {
+            t9Candidates(query).forEach { add(it.text, it.weight) }
+            coreT9Index[query].orEmpty().forEach { add(it.text, it.weight) }
+            val segmentations = decodeT9Syllables(query)
+            sentenceCandidates(segmentations).forEach { add(it.text, it.weight) }
+            segmentations.forEach { parts ->
+                combinations(parts, limit = 8).forEachIndexed { index, text ->
+                    add(text, 1_500_000 - index)
+                }
+            }
+            if (results.isEmpty()) {
+                (minOf(query.length, MAX_T9_DIGITS_PER_SYLLABLE) downTo 2).forEach { length ->
+                    t9Candidates(query.takeLast(length)).forEach { add(it.text, it.weight - 200_000) }
+                }
+            }
+            if (results.isEmpty()) add(displayPreedit(query), -1)
+            return results.mapIndexed { index, value ->
+                PinyinCandidate(value.text, value.weight.toDouble(), index, directCommit = true)
+            }
+        }
 
         CORE_PHRASES[query].orEmpty().forEach { add(it.text, it.weight) }
         fuzzyCorePhraseCandidates(query).forEach { add(it.text, it.weight) }
@@ -495,13 +522,10 @@ class LocalPinyinDecoder(context: Context) {
     }
 
     private fun decodeT9Syllables(query: String): List<List<String>> {
-        val known = CORE_SYLLABLES
-        val candidatesByDigits = known.asSequence()
-            .filter { t9Code(it) in query }
-            .groupBy(::t9Code)
-            .mapValues { (_, values) ->
-                values.sortedByDescending { syllableScore(it) }.take(MAX_T9_SYLLABLES_PER_KEY)
-            }
+        if (query.isBlank()) return emptyList()
+        t9SegmentationCache[query]?.let { return it }
+        if (t9SegmentationCache.size >= MAX_T9_SEGMENTATION_CACHE) t9SegmentationCache.clear()
+        val candidatesByDigits = t9SyllablesByDigits()
         val memo = HashMap<Int, List<List<String>>>()
         fun walk(offset: Int): List<List<String>> {
             if (offset == query.length) return listOf(emptyList())
@@ -520,12 +544,32 @@ class LocalPinyinDecoder(context: Context) {
             }
             return values.also { memo[offset] = it }
         }
-        return walk(0)
+        return walk(0).also { t9SegmentationCache[query] = it }
     }
 
     private fun displayPreedit(raw: String): String {
         if (raw.isBlank() || !raw.all(Char::isDigit)) return raw
-        return decodeT9Syllables(raw).firstOrNull()?.joinToString("").orEmpty()
+        return decodeT9Syllables(raw).firstOrNull()?.joinToString("")
+            ?: raw.map(::t9DisplayLetter).joinToString("")
+    }
+
+    private fun t9SyllablesByDigits(): Map<String, List<String>> {
+        t9SyllablesByCode.get().takeIf { it.isNotEmpty() }?.let { return it }
+        synchronized(t9SyllablesByCode) {
+            t9SyllablesByCode.get().takeIf { it.isNotEmpty() }?.let { return it }
+            val generated = CORE_SYLLABLES
+                .groupBy(::t9Code)
+                .mapValues { (_, values) ->
+                    values.sortedByDescending(::syllableScore).take(MAX_T9_SYLLABLES_PER_KEY)
+                }
+            t9SyllablesByCode.set(generated)
+            return generated
+        }
+    }
+
+    private fun t9DisplayLetter(digit: Char): Char = when (digit) {
+        '2' -> 'a'; '3' -> 'd'; '4' -> 'g'; '5' -> 'j'; '6' -> 'm'
+        '7' -> 'p'; '8' -> 't'; '9' -> 'w'; '1' -> '\''; else -> '?'
     }
 
     private fun syllableScore(syllable: String): Int = fullCandidates(syllable)
@@ -672,6 +716,7 @@ class LocalPinyinDecoder(context: Context) {
         private const val MAX_SYLLABLE_LENGTH = 6
         private const val MAX_T9_DIGITS_PER_SYLLABLE = 6
         private const val MAX_T9_SYLLABLES_PER_KEY = 8
+        private const val MAX_T9_SEGMENTATION_CACHE = 128
         private const val MAX_SENTENCE_SYLLABLES = 10
         private const val MAX_WORD_SYLLABLES = 5
         private const val MAX_WORD_OPTIONS = 4

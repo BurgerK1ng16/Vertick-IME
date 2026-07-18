@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.3.0 - 2026-07-18
+
+### English
+
+- Fixed unsolicited landscape keyboard opening during rotation, notification-shade changes, and IME view recreation. The floating keyboard now opens only from a fresh editor show request.
+- Refined the landscape header with a compact mode selector, an aligned `chevron-down` hide control, centered nine-key letters, and no numeric labels in landscape nine-key mode.
+- Added a shared portrait/landscape Hide-key setting, stronger nine-key T9 recovery, and candidate fallback protection.
+- Added seven candidate-text size levels, English sentence-initial auto-capitalization, and optional double-space period entry.
+- Replaced the keyboard key-click audio.
+
+### 简体中文
+
+- 修复横屏旋转、下拉状态栏和输入法视图重建时自动调出键盘的问题；悬浮键盘仅在新的文本输入请求时显示。
+- 优化横屏顶部模式切换与 `chevron-down` 收起键布局；九宫格横屏隐藏数字编码并居中显示字母。
+- 新增横竖屏共用的收起键开关，强化九宫格 T9 恢复与候选兜底。
+- 新增候选词七档大小、英文句首自动大写和双击空格输入句号设置。
+- 替换按键音效。
+
 ## 1.2.9 - 2026-07-17
 
 ### English
