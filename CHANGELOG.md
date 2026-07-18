@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.1 - 2026-07-18
+
+### English
+
+- Rebuilt the in-app management experience around a single Management landing page. Settings are now grouped into focused secondary pages for layout, key effects, auxiliary input, toolbar customization, keyboard management, clipboard, local data, input optimization, permissions, cloud connections, and About.
+- Redesigned secondary-page options as large rounded cards with Vertick-blue segmented controls, sliders, and animated toggles. Keyboard-mode and nine-key-symbol ordering remain drag-and-drop.
+- Replaced all screenshot-based setting instructions with native, lightweight operation guides. Each guide is rendered above its setting title and control, uses the current app theme, and does not ship external image assets.
+- Returning to a management page now restores its previous scroll position instead of resetting the page to the top.
+
+### 简体中文
+
+- 重构应用内管理页：以统一的“管理”首页作为入口，将设置拆分为布局和显示、按键效果、辅助输入、定制工具栏、键盘管理、剪贴板、本机数据、优化输入、权限管理、云端连接和关于等独立二级页。
+- 二级页选项统一改为大圆角卡片，使用维刻主题蓝色的分段控件、滑块和带动画的开关；键盘模式与九宫格符号仍支持拖动排序。
+- 删除设置页中的截图式操作说明，全部替换为原生轻量操作指引。指引位于每个选项的标题与控件上方，自动适配应用主题，也不再携带外部图片资源。
+- 从二级页返回时会恢复此前的阅读进度，不再自动回到页面顶部。
+
 ## 1.3.0 - 2026-07-18
 
 ### English

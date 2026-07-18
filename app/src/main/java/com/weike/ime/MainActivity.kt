@@ -1,6 +1,7 @@
 package com.weike.ime
 
 import android.Manifest
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.ClipData
 import android.content.pm.PackageManager
@@ -18,6 +19,7 @@ import android.view.DragEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -63,7 +65,11 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
-    private enum class Page { HOME, HISTORY, DICTIONARY, ACCOUNT, SETTINGS, CLOUD, ABOUT }
+    private enum class Page {
+        HOME, HISTORY, DICTIONARY, ACCOUNT, SETTINGS, CLOUD, ABOUT,
+        LAYOUT, KEY_EFFECTS, AUXILIARY_INPUT, TOOLBAR, KEYBOARD_MANAGEMENT,
+        CLIPBOARD_SETTINGS, LOCAL_DATA, OPTIMIZE_INPUT, PERMISSION_MANAGEMENT
+    }
 
     private class SegmentedControl(
         context: android.content.Context,
@@ -83,7 +89,7 @@ class MainActivity : AppCompatActivity() {
                 cornerRadius = 24 * density
             }
             selector.background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.WHITE)
+                setColor(Color.rgb(0, 55, 85))
                 cornerRadius = 20 * density
             }
             addView(selector)
@@ -121,7 +127,7 @@ class MainActivity : AppCompatActivity() {
             if (animated) selector.animate().translationX(targetX).setDuration(180).start()
             else selector.translationX = targetX
             labels.forEachIndexed { index, label ->
-                label.setTextColor(if (index == selected) Color.rgb(28, 27, 27) else Color.rgb(92, 95, 96))
+                label.setTextColor(if (index == selected) Color.WHITE else Color.rgb(92, 95, 96))
                 label.typeface = if (index == selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             }
         }
@@ -163,7 +169,7 @@ class MainActivity : AppCompatActivity() {
 
             if (value > 0f) {
                 val fill = RectF(track.left, track.top, track.left + track.width() * value, track.bottom)
-                paint.color = Color.rgb(37, 99, 235)
+                paint.color = Color.rgb(0, 55, 85)
                 canvas.drawRoundRect(fill, trackHeight / 2f, trackHeight / 2f, paint)
             }
 
@@ -200,10 +206,66 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private class BlueToggle(
+        context: android.content.Context,
+        initial: Boolean,
+        private val onChanged: (Boolean) -> Unit
+    ) : View(context) {
+        private val density = resources.displayMetrics.density
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var checked = initial
+        private var thumbProgress = if (initial) 1f else 0f
+
+        init {
+            layoutParams = LinearLayout.LayoutParams((54 * density).toInt(), (34 * density).toInt())
+            isClickable = true
+            contentDescription = "开关"
+        }
+
+        fun setChecked(next: Boolean, notify: Boolean = false) {
+            if (checked == next) return
+            checked = next
+            ValueAnimator.ofFloat(thumbProgress, if (next) 1f else 0f).apply {
+                duration = 180
+                interpolator = DecelerateInterpolator()
+                addUpdateListener {
+                    thumbProgress = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+            if (notify) onChanged(next)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val track = RectF(0f, 0f, width.toFloat(), height.toFloat())
+            paint.color = if (checked) Color.rgb(0, 55, 85) else Color.rgb(221, 222, 225)
+            canvas.drawRoundRect(track, height / 2f, height / 2f, paint)
+            paint.color = Color.WHITE
+            val radius = height / 2f - 4 * density
+            val centerX = height / 2f + (width - height) * thumbProgress
+            canvas.drawCircle(centerX, height / 2f, radius, paint)
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                setChecked(!checked, notify = true)
+                performClick()
+            }
+            return true
+        }
+
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
+    }
+
     private lateinit var container: AppContainer
     private lateinit var pageHost: FrameLayout
     private lateinit var bottomNavigation: LinearLayout
-    private var page = Page.HOME
+    private var page = Page.ACCOUNT
+    private val pageScrollPositions = mutableMapOf<Page, Int>()
 
     private var homeStats: TextView? = null
     private var statMinutes: TextView? = null
@@ -227,7 +289,8 @@ class MainActivity : AppCompatActivity() {
     private var dictionaryTab = 0
     private var dragHighlight: View? = null
     private var dragSource: View? = null
-    private val pagePrimary = Color.rgb(37, 99, 235)
+    private val pagePrimary = Color.rgb(0, 55, 85)
+    private val managementLogoBlue = Color.rgb(0, 55, 85)
     private val settingsBackCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
             showPage(Page.ACCOUNT)
@@ -246,11 +309,11 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, settingsBackCallback)
         observeData()
         lifecycleScope.launch { applyKeyboardTheme(container.settings.keyboardTheme()) }
-        showPage(Page.HOME)
+        showPage(Page.ACCOUNT)
     }
 
     override fun onBackPressed() {
-        if (page == Page.SETTINGS || page == Page.CLOUD || page == Page.ABOUT) showPage(Page.ACCOUNT) else super.onBackPressed()
+        if (page != Page.ACCOUNT) showPage(Page.ACCOUNT) else super.onBackPressed()
     }
 
     private fun buildShell(): View = LinearLayout(this).apply {
@@ -263,15 +326,17 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(7), dp(12), dp(12))
             setBackgroundColor(getColor(R.color.weike_panel))
+            visibility = View.GONE
         }
-        addView(bottomNavigation, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)))
     }
 
     private fun showPage(next: Page) {
+        while (pageHost.childCount > 1) pageHost.removeViewAt(0)
+        val previous = pageHost.getChildAt(0)
+        val previousPage = page
+        (previous as? ScrollView)?.let { pageScrollPositions[previousPage] = it.scrollY }
         page = next
-        pageHost.removeAllViews()
-        pageHost.addView(
-            when (next) {
+        val nextView = when (next) {
                 Page.HOME -> buildHome()
                 Page.HISTORY -> buildHistory()
                 Page.DICTIONARY -> buildDictionary()
@@ -279,11 +344,43 @@ class MainActivity : AppCompatActivity() {
                 Page.SETTINGS -> buildSettings()
                 Page.CLOUD -> buildCloudConfiguration()
                 Page.ABOUT -> buildAbout()
+                Page.LAYOUT -> buildLayoutDisplay()
+                Page.KEY_EFFECTS -> buildKeyEffects()
+                Page.AUXILIARY_INPUT -> buildAuxiliaryInput()
+                Page.TOOLBAR -> buildToolbarSettings()
+                Page.KEYBOARD_MANAGEMENT -> buildKeyboardManagement()
+                Page.CLIPBOARD_SETTINGS -> buildClipboardSettings()
+                Page.LOCAL_DATA -> buildLocalData()
+                Page.OPTIMIZE_INPUT -> buildOptimizeInput()
+                Page.PERMISSION_MANAGEMENT -> buildPermissionManagement()
             }
-        )
-        bottomNavigation.visibility = if (next == Page.SETTINGS || next == Page.CLOUD || next == Page.ABOUT) View.GONE else View.VISIBLE
-        settingsBackCallback.isEnabled = next == Page.SETTINGS || next == Page.CLOUD || next == Page.ABOUT
-        rebuildNavigation()
+        if (previous == null) {
+            pageHost.addView(nextView)
+        } else {
+            previous.animate().cancel()
+            nextView.alpha = 0f
+            nextView.translationX = dp(20).toFloat()
+            pageHost.addView(nextView)
+            nextView.animate()
+                .alpha(1f)
+                .translationX(0f)
+                .setDuration(220L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .start()
+            previous.animate()
+                .alpha(0f)
+                .translationX(-dp(10).toFloat())
+                .setDuration(160L)
+                .withEndAction {
+                    if (previous.parent === pageHost) pageHost.removeView(previous)
+                }
+                .start()
+        }
+        (nextView as? ScrollView)?.let { scrollView ->
+            scrollView.post { scrollView.scrollTo(0, pageScrollPositions[next] ?: 0) }
+        }
+        bottomNavigation.visibility = View.GONE
+        settingsBackCallback.isEnabled = next != Page.ACCOUNT
         updatePermissionStatus()
     }
 
@@ -293,7 +390,7 @@ class MainActivity : AppCompatActivity() {
             Triple(Page.HOME, "首页", R.drawable.ic_lucide_house),
             Triple(Page.HISTORY, "历史记录", R.drawable.ic_lucide_history),
             Triple(Page.DICTIONARY, "词典", R.drawable.ic_lucide_book_open),
-            Triple(Page.ACCOUNT, "账户", R.drawable.ic_lucide_user_round)
+            Triple(Page.ACCOUNT, "管理", R.drawable.ic_lucide_settings_2)
         ).forEach { (target, label, icon) ->
             val selected = page == target
             val tint = if (selected) pagePrimary else getColor(R.color.weike_muted)
@@ -432,21 +529,228 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildAccount(): View = screen {
-        addView(brandTitle("账户"))
+        addView(managementBrandHeader())
+        addView(section("听写统计"))
         addView(card().apply {
-            addView(actionRow("设置", "外观、键盘、标点、触感与按键音") { showPage(Page.SETTINGS) })
-            addDivider(this)
-            addView(actionRow("关于我们", "") { showPage(Page.ABOUT) })
+            addView(statsRow(
+                statCell("总听写时间", R.drawable.ic_lucide_clock_3) { statMinutes = it },
+                statCell("听写字数", R.drawable.ic_lucide_mic) { statWords = it }
+            ))
+            addView(statsRow(
+                statCell("节省的时间", R.drawable.ic_lucide_hourglass) { statSaved = it },
+                statCell("平均听写速度", R.drawable.ic_lucide_zap) { statSpeed = it }
+            ))
         })
-        microphoneStatus = subtitle("")
-        addView(microphoneStatus)
+        renderStats(latestStats)
+
+        addView(section("设置"))
+        addView(managementTileRow(
+            managementTile("布局和显示", "外观与候选词大小", R.drawable.ic_lucide_layout_dashboard) { showPage(Page.LAYOUT) },
+            managementTile("按键效果", "声音与触感强度", R.drawable.ic_lucide_zap) { showPage(Page.KEY_EFFECTS) }
+        ))
+        addView(managementTileRow(
+            managementTile("辅助输入", "标点与英文输入", R.drawable.ic_lucide_sliders_horizontal) { showPage(Page.AUXILIARY_INPUT) },
+            managementTile("定制工具栏", "模式胶囊与收起键", R.drawable.ic_lucide_settings_2) { showPage(Page.TOOLBAR) }
+        ), margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12))
+        addView(managementTileRow(
+            managementTile("键盘管理", "中文主键盘与九宫格", R.drawable.ic_lucide_keyboard) { showPage(Page.KEYBOARD_MANAGEMENT) },
+            managementTile("剪贴板", "本机剪贴板历史", R.drawable.ic_lucide_clipboard) { showPage(Page.CLIPBOARD_SETTINGS) }
+        ), margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12))
+        addView(managementTileRow(
+            managementTile("优化输入", "词典、文风与表达优化", R.drawable.ic_lucide_book_open) { showPage(Page.OPTIMIZE_INPUT) },
+            managementTile("语音与文本", "接口连接与模型配置", R.drawable.ic_lucide_cloud) { showPage(Page.CLOUD) }
+        ), margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12))
+
+        addView(section("更多"))
+        addView(managementTileRow(
+            managementTile("本机数据", "历史记录与本机学习", R.drawable.ic_lucide_history) { showPage(Page.LOCAL_DATA) },
+            managementTile("权限管理", "输入法、录音与悬浮窗", R.drawable.ic_lucide_settings_2) { showPage(Page.PERMISSION_MANAGEMENT) }
+        ))
+        addView(
+            managementSingleTile(
+                managementTile("关于", "开源协议与捐助", R.drawable.ic_lucide_circle_help) { showPage(Page.ABOUT) }
+            ),
+            margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12)
+        )
+    }
+
+    private fun buildLayoutDisplay(): View = screen {
+        addView(subpageHeader("布局和显示") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("外观", operationGuide("选择外观后立即应用至键盘", "暗黑模式、亮色模式与跟随系统可随时切换")) {
+            val themes = KeyboardTheme.entries.toList()
+            val themeControl = SegmentedControl(this@MainActivity, themes.map { it.displayName }, 0) { index ->
+                lifecycleScope.launch {
+                    val theme = themes[index]
+                    container.settings.saveKeyboardTheme(theme)
+                    applyKeyboardTheme(theme)
+                }
+            }
+            addView(themeControl)
+            lifecycleScope.launch {
+                val theme = container.settings.keyboardTheme()
+                themeControl.setSelected(themes.indexOf(theme).coerceAtLeast(0))
+            }
+        })
+        addView(illustratedOptionCard("候选词大小", operationGuide("拖动选择候选词字号", "默认字号居中，上下共提供七档")) {
+            val levels = (-3..3).toList()
+            val sizeControl = SegmentedControl(this@MainActivity, listOf("12", "14", "16", "默认", "20", "22", "24"), 0) { index ->
+                lifecycleScope.launch { container.settings.saveCandidateTextSizeLevel(levels[index]) }
+            }
+            addView(sizeControl)
+            lifecycleScope.launch { sizeControl.setSelected(container.settings.candidateTextSizeLevel() + 3) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildKeyEffects(): View = screen {
+        addView(subpageHeader("按键效果") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("触感强度", operationGuide("选择适合自己的触感强度", "每次按键会按当前强度反馈")) {
+            val haptics = HapticStrength.entries.toList()
+            val hapticControl = SegmentedControl(this@MainActivity, listOf("无", "系统", "弱", "适中", "较强", "强"), 0) { index ->
+                lifecycleScope.launch { container.settings.saveHapticStrength(haptics[index]) }
+            }
+            addView(hapticControl)
+            lifecycleScope.launch { hapticControl.setSelected(haptics.indexOf(container.settings.hapticStrength()).coerceAtLeast(0)) }
+        })
+        addView(illustratedOptionCard("按键音量", operationGuide("拖动滑块调整按键音量", "拖到最左侧即可静音")) {
+            val slider = VolumeSlider(this@MainActivity, 0.7f) { value, completed ->
+                if (completed) lifecycleScope.launch { container.settings.saveKeyboardSoundVolume(value) }
+            }
+            addView(slider)
+            lifecycleScope.launch { slider.setValue(container.settings.keyboardSoundVolume()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildAuxiliaryInput(): View = screen {
+        addView(subpageHeader("辅助输入") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("标点习惯", operationGuide("选择听写与润色结果的标点规则", "设置会在下一次输出时生效")) {
+            val punctuation = PunctuationPreference.entries.toList()
+            val punctuationControl = SegmentedControl(this@MainActivity, punctuation.map { it.displayName }, 0) { index ->
+                lifecycleScope.launch {
+                    val preference = punctuation[index]
+                    container.settings.savePunctuationPreference(preference)
+                }
+            }
+            addView(punctuationControl)
+            lifecycleScope.launch {
+                val preference = container.settings.punctuationPreference()
+                punctuationControl.setSelected(punctuation.indexOf(preference).coerceAtLeast(0))
+            }
+        })
+        val autoCapitalize = BlueToggle(this@MainActivity, false) { checked ->
+            lifecycleScope.launch { container.settings.saveEnglishAutoCapitalize(checked) }
+        }
+        addView(illustratedOptionCard("英文首字母自动大写", operationGuide("开启后，英文句首会自动使用大写字母"), autoCapitalize) {
+            lifecycleScope.launch { autoCapitalize.setChecked(container.settings.englishAutoCapitalize()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        val doubleSpace = BlueToggle(this@MainActivity, false) { checked ->
+            lifecycleScope.launch { container.settings.saveDoubleSpacePeriod(checked) }
+        }
+        addView(illustratedOptionCard("双击空格输入句号", operationGuide("连续双击文字键盘的空格键", "会输入一个句号并保留正常空格逻辑"), doubleSpace) {
+            lifecycleScope.launch { doubleSpace.setChecked(container.settings.doubleSpacePeriod()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildToolbarSettings(): View = screen {
+        addView(subpageHeader("定制工具栏") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("键盘模式", operationGuide("轻触开关显示或隐藏模式", "长按右侧拖动柄可调整模式顺序")) {
+            keyboardModesList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(keyboardModesList)
+        })
+        renderKeyboardModeControls(latestKeyboardModes)
+        val closeButton = BlueToggle(this@MainActivity, false) { checked ->
+            lifecycleScope.launch { container.settings.saveKeyboardCloseButtonEnabled(checked) }
+        }
+        addView(illustratedOptionCard("显示收起键", operationGuide("开启后，键盘右上角会显示收起按钮"), closeButton) {
+            lifecycleScope.launch { closeButton.setChecked(container.settings.keyboardCloseButtonEnabled()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildKeyboardManagement(): View = screen {
+        addView(subpageHeader("键盘管理") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("中文主键盘", operationGuide("选择 26 键全键盘或九宫格拼音", "切换后在下一次打开键盘时应用")) {
+            val layouts = ChineseKeyboardLayout.entries.toList()
+            val layoutControl = SegmentedControl(this@MainActivity, layouts.map { it.displayName }, 0) { index ->
+                lifecycleScope.launch {
+                    val layout = layouts[index]
+                    container.settings.saveChineseKeyboardLayout(layout)
+                }
+            }
+            addView(layoutControl)
+            lifecycleScope.launch {
+                val layout = container.settings.chineseKeyboardLayout()
+                layoutControl.setSelected(layouts.indexOf(layout).coerceAtLeast(0))
+            }
+        })
+        addView(illustratedOptionCard("九宫格符号", operationGuide("点击符号可编辑", "长按右侧拖动柄可调整侧边栏顺序")) {
+            nineKeySymbolsList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(nineKeySymbolsList)
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        renderNineKeySymbolControls(latestNineKeySymbols)
+    }
+
+    private fun buildClipboardSettings(): View = screen {
+        addView(subpageHeader("剪贴板") { showPage(Page.ACCOUNT) })
+        val clipboard = BlueToggle(this@MainActivity, false) { checked ->
+            lifecycleScope.launch { container.settings.saveClipboardHistoryEnabled(checked) }
+        }
+        addView(illustratedOptionCard(
+            "剪贴板历史",
+            operationGuide("复制的内容会显示在这里", "点击内容即可粘贴", "向左滑动可删除"),
+            clipboard
+        ) {
+            lifecycleScope.launch { clipboard.setChecked(container.settings.clipboardHistoryEnabled()) }
+        })
+    }
+
+    private fun buildLocalData(): View = screen {
+        addView(subpageHeader("本机数据") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("历史记录", operationGuide("选择自动保留时长", "选择“从不”会立即清除已有历史")) {
+            val options = HistoryRetention.entries.toList()
+            val labels = listOf("从不", "24小时", "1周", "1个月", "永久")
+            val control = SegmentedControl(this@MainActivity, labels, 0) { position ->
+                lifecycleScope.launch {
+                    val retention = options[position]
+                    container.settings.saveHistoryRetention(retention)
+                    if (retention == HistoryRetention.NEVER) container.inputHistory.deleteAll()
+                }
+            }
+            addView(control)
+            addDivider(this)
+            addView(actionRow("删除全部历史记录", "", destructive = true) {
+                lifecycleScope.launch { container.inputHistory.deleteAll() }
+            })
+            lifecycleScope.launch { control.setSelected(options.indexOf(container.settings.historyRetention()).coerceAtLeast(0)) }
+        })
+        addView(section("最近记录"))
+        historyList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        addView(historyList)
+        renderHistory(latestHistory)
+        addView(illustratedOptionCard("中文离线输入", operationGuide("候选与学习数据只保留在设备本地", "清除学习数据不会删除专业词和打字词典")) {
+            addView(actionRow("离线拼音词典", LocalPinyinDecoder.DICTIONARY_VERSION) {})
+            addDivider(this)
+            addView(actionRow("清除候选学习数据", "") {
+                sendBroadcast(Intent(WeikeInputMethodService.ACTION_CLEAR_RIME_LEARNING).setPackage(packageName))
+            })
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildOptimizeInput(): View = screen {
+        addView(subpageHeader("优化输入") { showPage(Page.ACCOUNT) })
+        addView(primaryButton("添加词条") { showAddDictionaryDialog() })
+        addView(section("专业词库"))
+        lexiconList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        addView(lexiconList)
+        renderLexicon(latestLexicon)
+        addView(section("打字词典"))
+        typingDictionaryList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        addView(typingDictionaryList)
+        renderTypingDictionary(latestTypingDictionary)
         addView(section("应用文风"))
-        addView(subtitle("按应用包名覆盖默认润色风格，例如 com.tencent.mm"))
         val packageInput = field("应用包名")
         val styles = WritingStyle.entries.toList()
         var selectedStyle = 0
         val styleControl = SegmentedControl(this@MainActivity, styles.map { it.displayName }, selectedStyle) { selectedStyle = it }
-        addView(card().apply {
+        addView(illustratedOptionCard("应用文风", operationGuide("输入应用包名后选择文风", "保存后，该应用的润色会使用指定文风")) {
             addView(packageInput)
             addView(styleControl)
             addView(primaryButton("保存应用文风") {
@@ -459,28 +763,38 @@ class MainActivity : AppCompatActivity() {
         overridesList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
         addView(overridesList)
         renderOverrides(latestOverrides)
-        addView(section("优化表达"))
-        addView(card().apply {
-            addView(Switch(this@MainActivity).apply {
-                text = "启用结构化表达优化"
-                textSize = 17f
-                setTextColor(getColor(R.color.weike_text))
-                lifecycleScope.launch { isChecked = container.settings.expressionOptimizationEnabled() }
-                setOnCheckedChangeListener { _, checked -> lifecycleScope.launch { container.settings.saveExpressionOptimization(checked) } }
+        val optimizeExpression = BlueToggle(this@MainActivity, false) { checked ->
+            lifecycleScope.launch { container.settings.saveExpressionOptimization(checked) }
+        }
+        addView(illustratedOptionCard("优化表达", operationGuide("开启后，分类和分点表达会自动整理", "仅影响润色，不改动手动输入内容"), optimizeExpression) {
+            lifecycleScope.launch { optimizeExpression.setChecked(container.settings.expressionOptimizationEnabled()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildPermissionManagement(): View = screen {
+        addView(subpageHeader("权限管理") { showPage(Page.ACCOUNT) })
+        addView(illustratedOptionCard("输入法与系统权限", operationGuide("依次完成输入法、录音和悬浮窗授权", "系统页面授权后返回此处即可继续使用")) {
+            addView(actionRow("启用维刻输入法", "") {
+                startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
             })
-        })
-        addView(section("中文离线输入"))
-        addView(card().apply {
-            addView(actionRow("离线拼音词典", LocalPinyinDecoder.DICTIONARY_VERSION) {})
             addDivider(this)
-            addView(actionRow("清除候选学习数据", "保留专业词与打字词典") {
-                sendBroadcast(Intent(WeikeInputMethodService.ACTION_CLEAR_RIME_LEARNING).setPackage(packageName))
+            addView(actionRow("切换输入法", "") {
+                getSystemService(InputMethodManager::class.java).showInputMethodPicker()
+            })
+            addDivider(this)
+            addView(actionRow("录音权限", "") {
+                requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+            })
+            addDivider(this)
+            addView(actionRow("横屏悬浮窗", "") {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:$packageName")))
             })
         })
-        addView(section("云端连接"))
-        addView(card().apply {
-            addView(actionRow("语音与文本接口配置", "") { showPage(Page.CLOUD) })
-        })
+        microphoneStatus = TextView(this@MainActivity).apply {
+            textSize = 15f
+            layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 14)
+        }
+        addView(microphoneStatus)
     }
 
     private fun buildCloudConfiguration(): View = screen {
@@ -797,6 +1111,48 @@ class MainActivity : AppCompatActivity() {
                 clipboardControl.setSelected(if (container.settings.clipboardHistoryEnabled()) 1 else 0)
             }
         })
+        addView(section("应用文风"))
+        val packageInput = field("应用包名")
+        val styles = WritingStyle.entries.toList()
+        var selectedStyle = 0
+        val styleControl = SegmentedControl(this@MainActivity, styles.map { it.displayName }, selectedStyle) { selectedStyle = it }
+        addView(card().apply {
+            addView(packageInput)
+            addView(styleControl)
+            addView(primaryButton("保存应用文风") {
+                lifecycleScope.launch {
+                    container.settings.saveOverride(packageInput.text.toString(), styles[selectedStyle])
+                    packageInput.text.clear()
+                }
+            })
+        })
+        overridesList = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        addView(overridesList)
+        renderOverrides(latestOverrides)
+        addView(section("优化表达"))
+        addView(card().apply {
+            addView(Switch(this@MainActivity).apply {
+                text = "启用结构化表达优化"
+                textSize = 17f
+                setTextColor(getColor(R.color.weike_text))
+                lifecycleScope.launch { isChecked = container.settings.expressionOptimizationEnabled() }
+                setOnCheckedChangeListener { _, checked ->
+                    lifecycleScope.launch { container.settings.saveExpressionOptimization(checked) }
+                }
+            })
+        })
+        addView(section("中文离线输入"))
+        addView(card().apply {
+            addView(actionRow("离线拼音词典", LocalPinyinDecoder.DICTIONARY_VERSION) {})
+            addDivider(this)
+            addView(actionRow("清除候选学习数据", "保留专业词与打字词典") {
+                sendBroadcast(Intent(WeikeInputMethodService.ACTION_CLEAR_RIME_LEARNING).setPackage(packageName))
+            })
+        })
+        addView(section("云端连接"))
+        addView(card().apply {
+            addView(actionRow("语音与文本接口配置", "") { showPage(Page.CLOUD) })
+        })
     }
 
     private fun subpageHeader(title: String, back: () -> Unit) = LinearLayout(this).apply {
@@ -1009,17 +1365,17 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(getColor(R.color.weike_text))
                     gravity = Gravity.CENTER_VERTICAL
                 }, LinearLayout.LayoutParams(0, dp(50), 1f))
-                val toggle = Switch(this@MainActivity).apply { isChecked = preference in enabled }
-                toggle.setOnCheckedChangeListener { _, checked ->
+                lateinit var toggle: BlueToggle
+                toggle = BlueToggle(this@MainActivity, preference in enabled) { checked ->
                     val next = order.toMutableList()
                     if (checked && preference !in next) next += preference
                     if (!checked) next.remove(preference)
                     if (next.isEmpty()) {
-                        toggle.isChecked = true
+                        toggle.setChecked(true)
                         Toast.makeText(this@MainActivity, "至少保留一个键盘模式", Toast.LENGTH_SHORT).show()
                     } else lifecycleScope.launch { container.settings.saveKeyboardModes(next) }
                 }
-                row.addView(toggle)
+                row.addView(toggle, LinearLayout.LayoutParams(dp(54), dp(34)))
                 if (preference in enabled) {
                     row.addView(ImageView(this@MainActivity).apply {
                         setImageResource(R.drawable.ic_lucide_grip_vertical)
@@ -1152,6 +1508,122 @@ class MainActivity : AppCompatActivity() {
         if (AppCompatDelegate.getDefaultNightMode() != mode) AppCompatDelegate.setDefaultNightMode(mode)
     }
 
+    private fun managementBrandHeader() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.app_icon)
+            background = roundedBackground(Color.TRANSPARENT, 16)
+            clipToOutline = true
+            scaleType = ImageView.ScaleType.CENTER_CROP
+        }, LinearLayout.LayoutParams(dp(64), dp(64)).apply { topMargin = dp(10) })
+        addView(TextView(this@MainActivity).apply {
+            text = "维刻输入法"
+            textSize = 25f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.weike_text))
+            layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 10)
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = "本地优先，语音与离线输入"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.weike_muted))
+            layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 3)
+        })
+    }
+
+    private fun managementPreview() = FrameLayout(this).apply {
+        background = roundedBackground(Color.rgb(232, 248, 244), 24)
+        setPadding(dp(18), dp(18), dp(18), dp(16))
+        addView(TextView(this@MainActivity).apply {
+            text = "维刻输入体验"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(getColor(R.color.weike_text))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(TextView(this@MainActivity).apply {
+            text = "语音、拼音与英文键盘"
+            textSize = 14f
+            setTextColor(getColor(R.color.weike_muted))
+        }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(28)
+        })
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_lucide_audio_lines)
+            setColorFilter(pagePrimary)
+            background = circleBackground(Color.WHITE)
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+        }, FrameLayout.LayoutParams(dp(46), dp(46), Gravity.TOP or Gravity.END))
+        addView(keyboardPreviewPlaceholder(), FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(98), Gravity.BOTTOM))
+    }
+
+    private fun keyboardPreviewPlaceholder() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        background = roundedBackground(Color.argb(92, 255, 255, 255), 16)
+        setPadding(dp(14), dp(13), dp(14), dp(13))
+        listOf(10, 9, 7).forEachIndexed { row, count ->
+            addView(LinearLayout(this@MainActivity).apply {
+                gravity = Gravity.CENTER
+                repeat(count) {
+                    addView(View(this@MainActivity).apply {
+                        background = roundedBackground(if (row == 2 && it == 0) Color.rgb(205, 230, 222) else Color.WHITE, 5)
+                    }, LinearLayout.LayoutParams(0, dp(15), 1f).apply {
+                        if (it < count - 1) marginEnd = dp(4)
+                    })
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(19)))
+        }
+    }
+
+    private fun managementTileRow(left: View, right: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(left, LinearLayout.LayoutParams(0, dp(156), 1f).apply { marginEnd = dp(12) })
+        addView(right, LinearLayout.LayoutParams(0, dp(156), 1f))
+    }
+
+    private fun managementSingleTile(tile: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(tile, LinearLayout.LayoutParams(0, dp(156), 1f).apply { marginEnd = dp(12) })
+        addView(View(this@MainActivity), LinearLayout.LayoutParams(0, dp(156), 1f))
+    }
+
+    private fun managementTile(title: String, detail: String, icon: Int, action: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(getColor(R.color.weike_panel), 18)
+        setPadding(dp(15), dp(14), dp(15), dp(13))
+        val header = FrameLayout(this@MainActivity)
+        header.addView(ImageView(this@MainActivity).apply {
+            setImageResource(icon)
+            setColorFilter(Color.argb(204, 0, 55, 85))
+            background = roundedBackground(Color.argb(51, 0, 55, 85), 9)
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+        }, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.START or Gravity.TOP))
+        header.addView(ImageView(this@MainActivity).apply {
+            setImageResource(R.drawable.ic_lucide_chevron_right)
+            setColorFilter(getColor(R.color.weike_muted))
+        }, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.END or Gravity.CENTER_VERTICAL))
+        addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38)))
+        addView(TextView(this@MainActivity).apply {
+            text = title
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(getColor(R.color.weike_text))
+            layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 10)
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = detail
+            textSize = 13f
+            maxLines = 2
+            setLineSpacing(dp(2).toFloat(), 1f)
+            setTextColor(getColor(R.color.weike_muted))
+            layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 3)
+        })
+        setOnClickListener { action() }
+    }
+
     private fun screen(children: LinearLayout.() -> Unit): ScrollView = ScrollView(this).apply {
         isFillViewport = true
         setBackgroundColor(getColor(R.color.weike_background))
@@ -1191,6 +1663,47 @@ class MainActivity : AppCompatActivity() {
         background = roundedBackground(getColor(R.color.weike_panel), 24)
         setPadding(dp(18), dp(14), dp(18), dp(14))
         layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = top)
+    }
+
+    private fun illustratedOptionCard(
+        title: String,
+        guide: View? = null,
+        trailing: View? = null,
+        content: LinearLayout.() -> Unit = {}
+    ) = card().apply {
+        guide?.let { addView(it, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, bottom = 12)) }
+        val titleRow = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL }
+        titleRow.addView(TextView(this@MainActivity).apply {
+            text = title
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(getColor(R.color.weike_text))
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        trailing?.let { titleRow.addView(it, LinearLayout.LayoutParams(dp(54), dp(34))) }
+        addView(titleRow)
+        content()
+    }
+
+    private fun operationGuide(vararg steps: String) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = roundedBackground(Color.rgb(244, 245, 247), 16)
+        setPadding(dp(14), dp(12), dp(14), dp(12))
+        addView(TextView(this@MainActivity).apply {
+            text = "操作指引"
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(pagePrimary)
+        })
+        steps.forEachIndexed { index, value ->
+            addView(TextView(this@MainActivity).apply {
+                text = value
+                textSize = 14f
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(if (index == 0) getColor(R.color.weike_text) else getColor(R.color.weike_muted))
+                background = roundedBackground(Color.WHITE, 10)
+                setPadding(dp(12), 0, dp(12), 0)
+            }, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(30), top = 7))
+        }
     }
 
     private fun actionRow(title: String, detail: String, destructive: Boolean = false, action: () -> Unit) = LinearLayout(this).apply {
