@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.2 - 2026-07-20
+
+### English
+
+- Reworked offline Pinyin ranking with a larger prebuilt Rime-Ice frequency overlay, per-reading candidate weights, stronger whole-phrase ranking, conservative typo recovery, and on-device confirmed-candidate learning.
+- Added deterministic structured-expression validation after polishing. Spoken lists such as “first, second, third” now remain numbered, line-separated output even when a cloud model returns a single paragraph.
+- Added real keyboard previews for appearance and candidate-size settings, a dedicated input test page, and refined theme-aware segmented controls, switches, sliders, and guidance styling.
+- Rebuilt cloud configuration around searchable provider selection. ASR and text models can independently use Xiaomi MiMo, Xiaomi MiMo Plan, or a custom OpenAI-compatible endpoint; model IDs can be loaded from `/v1/models` and selected in-app.
+
+### 简体中文
+
+- 重构离线拼音候选排序：引入更大的 Rime-Ice 词频覆盖、按读音保存候选权重、整词优先排序、保守纠错与本机确认候选学习。
+- 新增润色后的确定性结构化校验。“第一、第二、第三”等口述清单即使被云端模型返回为一段文字，也会稳定整理为带换行的编号列表。
+- 外观与候选词大小设置新增真实键盘预览；新增测试页，并统一优化分段控件、开关、滑块和操作指引的主题样式。
+- 云端连接改为可搜索的服务商选择。ASR 与文本模型可分别使用 Xiaomi MiMo、Xiaomi MiMo Plan 或自定义 OpenAI 兼容接口；支持读取 `/v1/models` 并在应用内选择模型。
+
 ## 1.3.1 - 2026-07-18
 
 ### English

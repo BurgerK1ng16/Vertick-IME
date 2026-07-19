@@ -23,6 +23,14 @@ data class EnglishLearning(
     val lastUsedAt: Long
 )
 
+/** Local ranking signal for explicitly confirmed Chinese candidates only. */
+@Entity(tableName = "pinyin_learning", primaryKeys = ["term"])
+data class PinyinLearning(
+    val term: String,
+    val useCount: Int,
+    val lastUsedAt: Long
+)
+
 /** A user-owned entry that must rank ahead of general keyboard candidates. */
 @Entity(tableName = "typing_dictionary", primaryKeys = ["term"])
 data class TypingDictionaryEntry(
@@ -76,6 +84,33 @@ interface EnglishLearningDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entry: EnglishLearning)
+}
+
+@Dao
+interface PinyinLearningDao {
+    @Query("SELECT * FROM pinyin_learning ORDER BY useCount DESC, lastUsedAt DESC LIMIT :limit")
+    suspend fun all(limit: Int = PINYIN_LEARNING_LIMIT): List<PinyinLearning>
+
+    @Query("SELECT * FROM pinyin_learning WHERE term = :term LIMIT 1")
+    suspend fun find(term: String): PinyinLearning?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: PinyinLearning)
+
+    @Query("DELETE FROM pinyin_learning")
+    suspend fun deleteAll()
+
+    @Query("DELETE FROM pinyin_learning WHERE term NOT IN (SELECT term FROM pinyin_learning ORDER BY useCount DESC, lastUsedAt DESC LIMIT :limit)")
+    suspend fun trimTo(limit: Int = PINYIN_LEARNING_LIMIT)
+
+    @androidx.room.Transaction
+    suspend fun record(term: String, now: Long = System.currentTimeMillis()) {
+        val value = term.trim()
+        if (value.isBlank()) return
+        val existing = find(value)
+        upsert(PinyinLearning(value, (existing?.useCount ?: 0) + 1, now))
+        trimTo()
+    }
 }
 
 @Dao
@@ -162,17 +197,19 @@ interface ClipboardDao {
     entities = [
         LexiconTerm::class,
         EnglishLearning::class,
+        PinyinLearning::class,
         TypingDictionaryEntry::class,
         UsageStats::class,
         InputHistory::class,
         ClipboardEntry::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class LexiconDatabase : RoomDatabase() {
     abstract fun lexiconDao(): LexiconDao
     abstract fun englishLearningDao(): EnglishLearningDao
+    abstract fun pinyinLearningDao(): PinyinLearningDao
     abstract fun typingDictionaryDao(): TypingDictionaryDao
     abstract fun usageStatsDao(): UsageStatsDao
     abstract fun inputHistoryDao(): InputHistoryDao
@@ -183,7 +220,7 @@ abstract class LexiconDatabase : RoomDatabase() {
 
         fun get(context: Context): LexiconDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, LexiconDatabase::class.java, "weike_lexicon.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build()
                 .also { instance = it }
         }
@@ -233,5 +270,14 @@ private val MIGRATION_6_7 = object : Migration(6, 7) {
     }
 }
 
+private val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            "CREATE TABLE IF NOT EXISTS pinyin_learning (term TEXT NOT NULL, useCount INTEGER NOT NULL, lastUsedAt INTEGER NOT NULL, PRIMARY KEY(term))"
+        )
+    }
+}
+
 private const val CLIPBOARD_LIMIT = 20
 private const val CLIPBOARD_RETENTION_MS = 24L * 60L * 60L * 1000L
+private const val PINYIN_LEARNING_LIMIT = 5_000

@@ -34,6 +34,7 @@ import com.weike.ime.data.InputHistoryType
 import com.weike.ime.data.KeyboardTheme
 import com.weike.ime.data.KeyboardModePreference
 import com.weike.ime.data.PunctuationPreference
+import com.weike.ime.data.PinyinLearning
 import com.weike.ime.data.TypingDictionaryEntry
 import com.weike.ime.data.VoiceUiState
 import com.weike.ime.data.WritingStyle
@@ -43,6 +44,7 @@ import com.weike.ime.speech.AudioRecorder
 import com.weike.ime.speech.BoundedPcmBuffer
 import com.weike.ime.speech.MimoAsrClient
 import com.weike.ime.text.JiebaSegmenter
+import com.weike.ime.text.StructuredExpressionFormatter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +111,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var pendingPinyinMutations = 0
     private var lastSyncedTerms: List<com.weike.ime.data.LexiconTerm> = emptyList()
     private var lastSyncedTypingDictionary: List<TypingDictionaryEntry> = emptyList()
+    private var lastPinyinLearning: List<PinyinLearning> = emptyList()
     private var englishBuffer = ""
     private var englishCandidates: List<PinyinCandidate> = emptyList()
     private var lastTextSpaceAtMs = 0L
@@ -289,6 +292,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         serviceScope.launch {
             lastSyncedTerms = container.lexicon.all()
             lastSyncedTypingDictionary = container.typingDictionary.all()
+            lastPinyinLearning = container.pinyinLearning.all()
             EnglishCandidateEngine.initialize(this@WeikeInputMethodService, container.englishLearning.all(), lastSyncedTypingDictionary)
             requestPinyinEngine()
             container.lexicon.observeAll().collect { terms ->
@@ -763,7 +767,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         engineLoadJob = serviceScope.launch(Dispatchers.Default) {
             runCatching {
                 ensureLatestLanguageData()
-                pinyinDecoder.startSession(lastSyncedTerms, lastSyncedTypingDictionary)
+                pinyinDecoder.startSession(lastSyncedTerms, lastSyncedTypingDictionary, lastPinyinLearning)
                 pinyinDecoder.selectChineseKeyboardLayout(chineseKeyboardLayout)
                 ensureJiebaReady()
             }.onFailure { Log.e(TAG, "Unable to start local Pinyin index", it) }
@@ -787,6 +791,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private suspend fun ensureLatestLanguageData() {
         if (lastSyncedTerms.isEmpty()) lastSyncedTerms = container.lexicon.all()
         if (lastSyncedTypingDictionary.isEmpty()) lastSyncedTypingDictionary = container.typingDictionary.all()
+        if (lastPinyinLearning.isEmpty()) lastPinyinLearning = container.pinyinLearning.all()
     }
 
     private fun scheduleLanguageEngineRelease() {
@@ -1002,8 +1007,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 .toSet()
             val terms = allTerms.sortedBy { if (it.term in segmentedTerms) 0 else 1 }
             val optimizeExpression = !askMode && container.settings.expressionOptimizationEnabled()
-            val structureHint = optimizeExpression && jieba.hasStructuredExpression(source)
-            val deepPolish = optimizeExpression && (structureHint || shouldUseDeepPolish(source))
+            val explicitStructureHint = StructuredExpressionFormatter.needsStructure(source)
+            val structureHint = !askMode && (
+                explicitStructureHint || (optimizeExpression && jieba.hasStructuredExpression(source))
+            )
+            val deepPolish = !askMode && (explicitStructureHint || (optimizeExpression && shouldUseDeepPolish(source)))
             val processingTimeout = when {
                 askMode -> ANSWER_PROCESSING_TIMEOUT_MS
                 deepPolish -> DEEP_POLISHING_TIMEOUT_MS
@@ -1018,8 +1026,9 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                         Log.w(TAG, "Fast polishing failed; inserting local fallback", error)
                         localPolishFallback(source)
                     }
+                    val structuredFastText = StructuredExpressionFormatter.enforce(source, fastText)
                     return@withTimeoutOrNull VoiceProcessingResult.Success(
-                        text = applyPunctuationPreference(fastText, activePunctuation),
+                        text = applyPunctuationPreference(structuredFastText, activePunctuation),
                         instant = true
                     )
                 }
@@ -1046,14 +1055,18 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                         source
                     }
                 }
-                VoiceProcessingResult.Success(applyPunctuationPreference(polishedText, activePunctuation))
+                val structuredText = StructuredExpressionFormatter.enforce(source, polishedText)
+                VoiceProcessingResult.Success(applyPunctuationPreference(structuredText, activePunctuation))
             }
             if (!isCurrentVoiceSession(sessionId, sessionMode)) return@launch
             when (result) {
                 null -> {
                     if (sessionMode == KeyboardMode.VOICE && rawTranscript.isNotBlank()) {
                         commitResult(
-                            applyPunctuationPreference(localPolishFallback(rawTranscript), activePunctuation),
+                            applyPunctuationPreference(
+                                StructuredExpressionFormatter.enforce(rawTranscript, localPolishFallback(rawTranscript)),
+                                activePunctuation
+                            ),
                             sessionId,
                             sessionMode,
                             instant = true,
@@ -1208,9 +1221,13 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         return when (preference) {
             PunctuationPreference.SMART -> cleaned
             PunctuationPreference.SPACES -> cleaned
-            .replace(Regex("[，。！？、；：,.!?;:…—()（）\\[\\]{}\\\"'“”]+"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+                .split('\n')
+                .joinToString("\n") { line ->
+                    line.replace(Regex("[，。！？、；：,.!?;:…—()（）\\[\\]{}\\\"'“”]+"), " ")
+                        .replace(Regex("[ \\t]+"), " ")
+                        .trim()
+                }
+                .trim()
             PunctuationPreference.NO_END -> cleaned
             .replace(Regex("[\\s，。！？、；：,.!?;:…—]+$"), "")
             .trimEnd()
@@ -1218,9 +1235,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun cleanSymbols(text: String): String = text
-        .replace(Regex("[\\u00A0\\t\\r\\n]+"), " ")
-        .replace(Regex("\\s+"), " ")
-        .replace(Regex("\\s+([，。！？、；：,.!?;:])"), "$1")
+        .replace("\r\n", "\n")
+        .replace(Regex("[\\u00A0\\t\\r]+"), " ")
+        .lineSequence()
+        .joinToString("\n") { line ->
+            line.replace(Regex(" {2,}"), " ")
+                .replace(Regex(" +([，。！？、；：,.!?;:])"), "$1")
+                .trim()
+        }
+        .replace(Regex("\\n{3,}"), "\n\n")
         .replace(Regex("([（(【\\[])[\\s]+"), "$1")
         .replace(Regex("[\\s]+([）)】\\]])"), "$1")
         .replace(Regex("([，。！？、；：,.!?;:]){2,}")) { match ->
@@ -1245,6 +1268,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         .trim()
 
     private fun shouldUseDeepPolish(text: String): Boolean {
+        if (StructuredExpressionFormatter.needsStructure(text)) return true
         val normalized = text.replace(Regex("\\s+"), "")
         val cues = listOf(
             "一是", "二是", "三是", "第一", "第二", "第三",
@@ -1541,6 +1565,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitDirectPinyin(text: String) {
+        if (!sensitiveField && pinyinDecoder.learnCandidate(text)) {
+            serviceScope.launch(Dispatchers.IO) {
+                container.pinyinLearning.record(text)
+                lastPinyinLearning = container.pinyinLearning.all()
+            }
+        }
         pinyinDecoder.clear()
         pinyinBuffer = ""
         pinyinRawBuffer = ""
@@ -1684,6 +1714,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             val cleared = runCatching { pinyinMutex.withLock { pinyinDecoder.clearUserLearning() } }
                 .onFailure { Log.e(TAG, "Unable to clear local Pinyin learning data", it) }
                 .getOrDefault(false)
+            if (cleared) {
+                lastPinyinLearning = emptyList()
+                serviceScope.launch(Dispatchers.IO) { container.pinyinLearning.deleteAll() }
+            }
             render()
             toast(if (cleared) "已清除本机候选学习数据" else "清除学习数据失败")
         }

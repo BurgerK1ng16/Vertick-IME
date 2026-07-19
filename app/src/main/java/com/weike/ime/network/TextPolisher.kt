@@ -4,6 +4,7 @@ import com.weike.ime.data.LexiconTerm
 import com.weike.ime.data.ModelEndpointConfig
 import com.weike.ime.data.PunctuationPreference
 import com.weike.ime.data.WritingStyle
+import com.weike.ime.text.StructuredExpressionFormatter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -476,15 +477,25 @@ class MimoTextPolisher(
         }
         val structureRule = if (forceStructure) {
             """
-            这段口述已被判定为结构化内容。必须输出带换行的层级标题和编号列表，不能只输出一段润色后的连续文字。
-            将“一是、二是、三是”“第一、第二、第三”“首先、其次、最后”“分别是”等并列事项拆成独立的 1.、2.、3. 条目。
-            有总述时先保留总述，再换行列出条目；括号中的补充说明写为对应条目下的“备注：”。
-            作文、提纲和框架内容要先按段落或主题分组，再列出子项。
+            这段口述已被判定为结构化内容。必须真正换行输出，不能只补标点或空格后仍保留为一段连续文字。
+            结构判断：只有 1 件事用完整段落；有 2 件及以上可区分事项时必须编号；3 件以上且存在不同主题时先按主题分组。
+            同一类待办、步骤或清单保持扁平列表，使用“1.内容”“2.内容”“3.内容”；不同主题才使用一级主题和缩进的“(a)内容”“(b)内容”。
+            将“一是、二是、三是”“第一、第二、第三”“首先、其次、最后”“包括、分别是、原因有、分为”等标记和中文停顿拆成独立条目。
+            有总述时先保留总述并以冒号结束，再换行列出条目；括号中的补充说明写为对应条目下的“备注：”。
+            不得凭空增加事项、主题、事实或结论；不得把用户的问题改成答案。
+            示例：
+            输入：今天要做三件事，第一睡觉，第二刷牙，第三洗澡
+            输出：
+            今天要做三件事：
+            1.睡觉
+            2.刷牙
+            3.洗澡
             """.trimIndent()
         } else if (optimizeExpression) {
             """
-            当口述包含分类、分点、步骤、待办、提纲、框架或并列事项时，请整理成清晰的层级标题和编号列表。
-            对含有“一是/二是/三是、第一/第二/第三、首先/其次/最后、分别是”等标记的内容，使用换行和 1.、2.、3. 等编号，不能只补标点后保留为连续段落。
+            当口述包含分类、分点、步骤、待办、提纲、框架、并列事项或“包括/原因有/分为”等结构信号时，必须整理成真正换行的编号列表。
+            两个及以上事项使用 1.、2.、3.；同类事项保持扁平，不要为了复杂而强行分组；不同主题才增加主题层和 (a)、(b) 子项。
+            对含有“一是/二是/三是、第一/第二/第三、首先/其次/最后、分别是”等标记的内容，不能只补标点后保留为连续段落。
             保留全部原意，不补充新事实。括号中的补充说明优先整理成对应条目的“备注：”。
             对观点对立类作文框架，按开头段、中间段、结尾段分组，再拆成可读子项。
             """.trimIndent()
@@ -507,6 +518,7 @@ class MimoTextPolisher(
     }
 
     private fun needsStructuredExpression(text: String): Boolean {
+        if (StructuredExpressionFormatter.needsStructure(text)) return true
         val normalized = text.replace(Regex("\\s+"), "")
         val cues = listOf(
             "一是", "二是", "三是", "第一", "第二", "第三",

@@ -13,7 +13,9 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Bundle
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.DragEvent
 import android.view.MotionEvent
@@ -32,6 +34,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.PopupWindow
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +45,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.weike.ime.data.AppContainer
 import com.weike.ime.data.ChineseKeyboardLayout
+import com.weike.ime.data.CloudProvider
 import com.weike.ime.data.HapticStrength
 import com.weike.ime.data.HistoryRetention
 import com.weike.ime.data.InputHistory
@@ -58,6 +62,7 @@ import com.weike.ime.ime.LocalPinyinDecoder
 import com.weike.ime.ime.WeikeInputMethodService
 import com.weike.ime.network.MimoTextPolisher
 import com.weike.ime.network.MimoApiConfig
+import com.weike.ime.network.ModelCatalog
 import com.weike.ime.speech.MimoAsrClient
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
@@ -68,7 +73,7 @@ class MainActivity : AppCompatActivity() {
     private enum class Page {
         HOME, HISTORY, DICTIONARY, ACCOUNT, SETTINGS, CLOUD, ABOUT,
         LAYOUT, KEY_EFFECTS, AUXILIARY_INPUT, TOOLBAR, KEYBOARD_MANAGEMENT,
-        CLIPBOARD_SETTINGS, LOCAL_DATA, OPTIMIZE_INPUT, PERMISSION_MANAGEMENT
+        CLIPBOARD_SETTINGS, LOCAL_DATA, OPTIMIZE_INPUT, PERMISSION_MANAGEMENT, TEST
     }
 
     private class SegmentedControl(
@@ -83,14 +88,14 @@ class MainActivity : AppCompatActivity() {
         private var selected = initial.coerceIn(0, options.lastIndex)
 
         init {
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (48 * density).toInt())
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (46 * density).toInt())
             background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.rgb(229, 226, 225))
-                cornerRadius = 24 * density
+                setColor(ContextCompat.getColor(context, R.color.weike_key))
+                cornerRadius = 15 * density
             }
             selector.background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.rgb(0, 55, 85))
-                cornerRadius = 20 * density
+                setColor(Color.rgb(18, 95, 142))
+                cornerRadius = 12 * density
             }
             addView(selector)
             val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
@@ -117,20 +122,152 @@ class MainActivity : AppCompatActivity() {
 
         private fun render(animated: Boolean) {
             if (width == 0 || options.isEmpty()) return
-            val inset = (3 * density).toInt()
+            val inset = (4 * density).toInt()
             val cell = width / options.size
             selector.layoutParams = FrameLayout.LayoutParams(cell - inset * 2, height - inset * 2).apply {
                 leftMargin = inset
                 topMargin = inset
             }
             val targetX = (selected * cell).toFloat()
-            if (animated) selector.animate().translationX(targetX).setDuration(180).start()
+            if (animated) selector.animate().translationX(targetX).setDuration(220).setInterpolator(DecelerateInterpolator()).start()
             else selector.translationX = targetX
             labels.forEachIndexed { index, label ->
-                label.setTextColor(if (index == selected) Color.WHITE else Color.rgb(92, 95, 96))
+                label.setTextColor(if (index == selected) Color.WHITE else ContextCompat.getColor(context, R.color.weike_muted))
                 label.typeface = if (index == selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             }
         }
+    }
+
+    private class CloudProviderDropdown(
+        context: android.content.Context,
+        initial: CloudProvider,
+        private val onSelected: (CloudProvider) -> Unit
+    ) : LinearLayout(context) {
+        private val choices = CloudProvider.entries.toList()
+        private var selected = initial
+        private val icon = ImageView(context)
+        private val label = TextView(context)
+
+        init {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 14), 0, dp(context, 12), 0)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(ContextCompat.getColor(context, R.color.weike_key))
+                cornerRadius = dp(context, 14).toFloat()
+            }
+            icon.scaleType = ImageView.ScaleType.CENTER_INSIDE
+            addView(icon, LayoutParams(dp(context, 26), dp(context, 26)))
+            label.textSize = 16f
+            label.gravity = Gravity.CENTER_VERTICAL
+            label.setPadding(dp(context, 10), 0, dp(context, 6), 0)
+            addView(label, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.ic_lucide_chevron_down)
+                setColorFilter(ContextCompat.getColor(context, R.color.weike_muted))
+                contentDescription = "展开模型厂商"
+            }, LayoutParams(dp(context, 22), dp(context, 22)))
+            isClickable = true
+            setOnClickListener { showMenu() }
+            render()
+        }
+
+        fun setSelected(value: CloudProvider, notify: Boolean = false) {
+            if (selected == value && !notify) return
+            selected = value
+            render()
+            if (notify) onSelected(value)
+        }
+
+        private fun render() {
+            icon.setImageResource(if (selected == CloudProvider.CUSTOM) R.drawable.provider_custom_logo else R.drawable.ic_xiaomi_mimo)
+            icon.clearColorFilter()
+            label.text = selected.displayName
+            label.setTextColor(ContextCompat.getColor(context, R.color.weike_text))
+            label.typeface = Typeface.DEFAULT_BOLD
+        }
+
+        private fun showMenu() {
+            val content = LinearLayout(context).apply {
+                orientation = VERTICAL
+                setPadding(dp(context, 10), dp(context, 10), dp(context, 10), dp(context, 10))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(ContextCompat.getColor(context, R.color.weike_panel))
+                    cornerRadius = dp(context, 16).toFloat()
+                }
+            }
+            val search = EditText(context).apply {
+                hint = "搜索模型厂商"
+                setSingleLine(true)
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(context, R.color.weike_text))
+                setHintTextColor(ContextCompat.getColor(context, R.color.weike_muted))
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(ContextCompat.getColor(context, R.color.weike_key))
+                    cornerRadius = dp(context, 11).toFloat()
+                }
+                setPadding(dp(context, 12), 0, dp(context, 12), 0)
+            }
+            val rows = LinearLayout(context).apply { orientation = VERTICAL }
+            content.addView(search, LayoutParams(LayoutParams.MATCH_PARENT, dp(context, 46)))
+            content.addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(context, 8) })
+            val popup = PopupWindow(content, width.coerceAtLeast(dp(context, 260)), LayoutParams.WRAP_CONTENT, true).apply {
+                isOutsideTouchable = true
+                elevation = dp(context, 10).toFloat()
+                setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+            }
+            fun renderRows(query: String) {
+                rows.removeAllViews()
+                choices.filter { it.displayName.contains(query.trim(), ignoreCase = true) }.forEachIndexed { index, provider ->
+                    rows.addView(providerRow(provider, popup), LayoutParams(LayoutParams.MATCH_PARENT, dp(context, 54)).apply {
+                        if (index > 0) topMargin = dp(context, 5)
+                    })
+                }
+                if (rows.childCount == 0) {
+                    rows.addView(TextView(context).apply {
+                        text = "没有匹配的模型厂商"
+                        gravity = Gravity.CENTER
+                        textSize = 14f
+                        setTextColor(ContextCompat.getColor(context, R.color.weike_muted))
+                    }, LayoutParams(LayoutParams.MATCH_PARENT, dp(context, 54)))
+                }
+            }
+            search.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = renderRows(value?.toString().orEmpty())
+                override fun afterTextChanged(value: Editable?) = Unit
+            })
+            renderRows("")
+            popup.showAsDropDown(this, 0, dp(context, 7))
+        }
+
+        private fun providerRow(provider: CloudProvider, popup: PopupWindow) = LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 12), 0, dp(context, 12), 0)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(if (provider == selected) Color.rgb(226, 239, 247) else ContextCompat.getColor(context, R.color.weike_key))
+                cornerRadius = dp(context, 11).toFloat()
+            }
+            addView(ImageView(context).apply {
+                setImageResource(if (provider == CloudProvider.CUSTOM) R.drawable.provider_custom_logo else R.drawable.ic_xiaomi_mimo)
+                clearColorFilter()
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+            }, LayoutParams(dp(context, 25), dp(context, 25)))
+            addView(TextView(context).apply {
+                text = provider.displayName
+                textSize = 15f
+                gravity = Gravity.CENTER_VERTICAL
+                setTextColor(ContextCompat.getColor(context, R.color.weike_text))
+                setPadding(dp(context, 11), 0, 0, 0)
+            }, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+            setOnClickListener {
+                setSelected(provider, true)
+                popup.dismiss()
+            }
+        }
+
+        private fun dp(context: android.content.Context, value: Int): Int =
+            (value * context.resources.displayMetrics.density).toInt()
     }
 
     /** A compact slider drawn with the same rounded track language as segmented controls. */
@@ -164,24 +301,24 @@ class MainActivity : AppCompatActivity() {
             val trackHeight = 18 * density
             val top = (height - trackHeight) / 2f
             track.set(side, top, width - side, top + trackHeight)
-            paint.color = Color.rgb(229, 226, 225)
+            paint.color = ContextCompat.getColor(context, R.color.weike_key)
             canvas.drawRoundRect(track, trackHeight / 2f, trackHeight / 2f, paint)
 
             if (value > 0f) {
                 val fill = RectF(track.left, track.top, track.left + track.width() * value, track.bottom)
-                paint.color = Color.rgb(0, 55, 85)
+                paint.color = Color.rgb(18, 95, 142)
                 canvas.drawRoundRect(fill, trackHeight / 2f, trackHeight / 2f, paint)
             }
 
             val thumbX = track.left + track.width() * value
             paint.setShadowLayer(2 * density, 0f, density, 0x33000000)
             setLayerType(LAYER_TYPE_SOFTWARE, paint)
-            paint.color = Color.WHITE
+            paint.color = ContextCompat.getColor(context, R.color.weike_panel)
             canvas.drawCircle(thumbX, track.centerY(), 13 * density, paint)
             paint.clearShadowLayer()
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = density
-            paint.color = Color.rgb(207, 204, 203)
+            paint.color = ContextCompat.getColor(context, R.color.weike_muted)
             canvas.drawCircle(thumbX, track.centerY(), 13 * density, paint)
             paint.style = Paint.Style.FILL
         }
@@ -217,7 +354,7 @@ class MainActivity : AppCompatActivity() {
         private var thumbProgress = if (initial) 1f else 0f
 
         init {
-            layoutParams = LinearLayout.LayoutParams((54 * density).toInt(), (34 * density).toInt())
+            layoutParams = LinearLayout.LayoutParams((52 * density).toInt(), (32 * density).toInt())
             isClickable = true
             contentDescription = "开关"
         }
@@ -239,10 +376,10 @@ class MainActivity : AppCompatActivity() {
 
         override fun onDraw(canvas: Canvas) {
             val track = RectF(0f, 0f, width.toFloat(), height.toFloat())
-            paint.color = if (checked) Color.rgb(0, 55, 85) else Color.rgb(221, 222, 225)
+            paint.color = if (checked) Color.rgb(18, 95, 142) else ContextCompat.getColor(context, R.color.weike_key)
             canvas.drawRoundRect(track, height / 2f, height / 2f, paint)
-            paint.color = Color.WHITE
-            val radius = height / 2f - 4 * density
+            paint.color = ContextCompat.getColor(context, R.color.weike_panel)
+            val radius = height / 2f - 4.5f * density
             val centerX = height / 2f + (width - height) * thumbProgress
             canvas.drawCircle(centerX, height / 2f, radius, paint)
         }
@@ -258,6 +395,95 @@ class MainActivity : AppCompatActivity() {
         override fun performClick(): Boolean {
             super.performClick()
             return true
+        }
+    }
+
+    /** Live miniature of the keyboard used by display-related settings. */
+    private class KeyboardSettingsPreview(context: android.content.Context) : View(context) {
+        private val density = resources.displayMetrics.density
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val rect = RectF()
+        private var theme = KeyboardTheme.DARK
+        private var candidateLevel = 0
+
+        init {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (142 * density).toInt())
+        }
+
+        fun setTheme(value: KeyboardTheme) {
+            theme = value
+            invalidate()
+        }
+
+        fun setCandidateLevel(value: Int) {
+            candidateLevel = value.coerceIn(-3, 3)
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            rect.set(0f, 0f, width.toFloat(), height.toFloat())
+            when (theme) {
+                KeyboardTheme.DARK -> drawKeyboard(canvas, true)
+                KeyboardTheme.LIGHT -> drawKeyboard(canvas, false)
+                KeyboardTheme.SYSTEM -> {
+                    canvas.save()
+                    canvas.clipRect(0f, 0f, width / 2f, height.toFloat())
+                    drawKeyboard(canvas, false)
+                    canvas.restore()
+                    canvas.save()
+                    canvas.clipRect(width / 2f, 0f, width.toFloat(), height.toFloat())
+                    drawKeyboard(canvas, true)
+                    canvas.restore()
+                    paint.color = Color.argb(35, 255, 255, 255)
+                    canvas.drawRect(width / 2f - density / 2f, 0f, width / 2f + density / 2f, height.toFloat(), paint)
+                }
+            }
+        }
+
+        private fun drawKeyboard(canvas: Canvas, dark: Boolean) {
+            val surface = if (dark) Color.rgb(38, 39, 42) else Color.rgb(242, 244, 247)
+            val key = if (dark) Color.rgb(76, 78, 83) else Color.WHITE
+            val text = if (dark) Color.rgb(247, 248, 249) else Color.rgb(28, 31, 35)
+            val muted = if (dark) Color.rgb(181, 184, 190) else Color.rgb(100, 106, 114)
+            val margin = 10 * density
+            val candidateHeight = 42 * density
+            paint.color = surface
+            canvas.drawRoundRect(rect, 20 * density, 20 * density, paint)
+
+            paint.color = if (dark) Color.rgb(52, 54, 58) else Color.rgb(231, 235, 240)
+            canvas.drawRoundRect(RectF(margin, margin, width - margin, margin + candidateHeight), 12 * density, 12 * density, paint)
+            paint.textAlign = Paint.Align.LEFT
+            paint.typeface = Typeface.DEFAULT_BOLD
+            paint.textSize = (11 + candidateLevel * 1.15f) * density
+            paint.color = text
+            canvas.drawText("今天", margin + 12 * density, margin + candidateHeight * .63f, paint)
+            paint.color = muted
+            canvas.drawText("候选词", width * .39f, margin + candidateHeight * .63f, paint)
+            canvas.drawText("输入法", width * .69f, margin + candidateHeight * .63f, paint)
+
+            val rows = intArrayOf(8, 7, 5)
+            val keyTop = margin + candidateHeight + 9 * density
+            val availableHeight = height - keyTop - margin
+            rows.forEachIndexed { row, count ->
+                val gap = 5 * density
+                val keyHeight = (availableHeight - gap * (rows.size - 1)) / rows.size
+                val rowWidth = width - margin * 2 - gap * (count - 1)
+                val keyWidth = rowWidth / count
+                val top = keyTop + row * (keyHeight + gap)
+                repeat(count) { index ->
+                    val left = margin + index * (keyWidth + gap)
+                    paint.color = key
+                    canvas.drawRoundRect(RectF(left, top, left + keyWidth, top + keyHeight), 7 * density, 7 * density, paint)
+                    if (row < 2) {
+                        paint.textAlign = Paint.Align.CENTER
+                        paint.typeface = Typeface.DEFAULT
+                        paint.textSize = 8 * density
+                        paint.color = text
+                        canvas.drawText(('A'.code + (row * 8 + index) % 26).toChar().toString(), left + keyWidth / 2f, top + keyHeight * .64f, paint)
+                    }
+                }
+            }
         }
     }
 
@@ -353,6 +579,7 @@ class MainActivity : AppCompatActivity() {
                 Page.LOCAL_DATA -> buildLocalData()
                 Page.OPTIMIZE_INPUT -> buildOptimizeInput()
                 Page.PERMISSION_MANAGEMENT -> buildPermissionManagement()
+                Page.TEST -> buildTestPage()
             }
         if (previous == null) {
             pageHost.addView(nextView)
@@ -566,21 +793,21 @@ class MainActivity : AppCompatActivity() {
             managementTile("本机数据", "历史记录与本机学习", R.drawable.ic_lucide_history) { showPage(Page.LOCAL_DATA) },
             managementTile("权限管理", "输入法、录音与悬浮窗", R.drawable.ic_lucide_settings_2) { showPage(Page.PERMISSION_MANAGEMENT) }
         ))
-        addView(
-            managementSingleTile(
-                managementTile("关于", "开源协议与捐助", R.drawable.ic_lucide_circle_help) { showPage(Page.ABOUT) }
-            ),
-            margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12)
-        )
+        addView(managementTileRow(
+            managementTile("关于", "开源协议与捐助", R.drawable.ic_lucide_circle_help) { showPage(Page.ABOUT) },
+            managementTile("测试", "验证输入法与当前配置", R.drawable.ic_lucide_keyboard) { showPage(Page.TEST) }
+        ), margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12))
     }
 
     private fun buildLayoutDisplay(): View = screen {
         addView(subpageHeader("布局和显示") { showPage(Page.ACCOUNT) })
-        addView(illustratedOptionCard("外观", operationGuide("选择外观后立即应用至键盘", "暗黑模式、亮色模式与跟随系统可随时切换")) {
+        val themePreview = KeyboardSettingsPreview(this@MainActivity)
+        addView(illustratedOptionCard("外观", themePreview) {
             val themes = KeyboardTheme.entries.toList()
             val themeControl = SegmentedControl(this@MainActivity, themes.map { it.displayName }, 0) { index ->
                 lifecycleScope.launch {
                     val theme = themes[index]
+                    themePreview.setTheme(theme)
                     container.settings.saveKeyboardTheme(theme)
                     applyKeyboardTheme(theme)
                 }
@@ -588,17 +815,45 @@ class MainActivity : AppCompatActivity() {
             addView(themeControl)
             lifecycleScope.launch {
                 val theme = container.settings.keyboardTheme()
+                themePreview.setTheme(theme)
                 themeControl.setSelected(themes.indexOf(theme).coerceAtLeast(0))
             }
         })
-        addView(illustratedOptionCard("候选词大小", operationGuide("拖动选择候选词字号", "默认字号居中，上下共提供七档")) {
+        val candidatePreview = KeyboardSettingsPreview(this@MainActivity)
+        addView(illustratedOptionCard("候选词大小", candidatePreview) {
             val levels = (-3..3).toList()
             val sizeControl = SegmentedControl(this@MainActivity, listOf("12", "14", "16", "默认", "20", "22", "24"), 0) { index ->
+                candidatePreview.setCandidateLevel(levels[index])
                 lifecycleScope.launch { container.settings.saveCandidateTextSizeLevel(levels[index]) }
             }
             addView(sizeControl)
-            lifecycleScope.launch { sizeControl.setSelected(container.settings.candidateTextSizeLevel() + 3) }
+            lifecycleScope.launch {
+                val level = container.settings.candidateTextSizeLevel()
+                candidatePreview.setCandidateLevel(level)
+                sizeControl.setSelected(level + 3)
+            }
         }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+    }
+
+    private fun buildTestPage(): View = screen {
+        addView(subpageHeader("测试") { showPage(Page.ACCOUNT) })
+        addView(operationGuide("在文本框内验证当前输入法、候选词和听写结果", "当前保存的外观、字号、按键效果会直接应用"))
+        addView(section("测试输入"))
+        val input = EditText(this@MainActivity).apply {
+            hint = "在这里试试拼音、英文、语音和润色"
+            setTextColor(getColor(R.color.weike_text))
+            setHintTextColor(getColor(R.color.weike_muted))
+            textSize = 17f
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 7
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            background = roundedBackground(getColor(R.color.weike_key), 16)
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        addView(card().apply {
+            addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(190)))
+            addView(primaryButton("清空文本") { input.text.clear() }, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(46), top = 12))
+        })
     }
 
     private fun buildKeyEffects(): View = screen {
@@ -798,17 +1053,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildCloudConfiguration(): View = screen {
-        addView(subpageHeader("语音与文本接口配置") { showPage(Page.ACCOUNT) })
+        addView(subpageHeader("语音与文本") { showPage(Page.ACCOUNT) })
         addView(section("ASR 接口"))
-        addView(endpointConfigurationCard(
+        addView(providerConfigurationCard(
+            isAsr = true,
             load = { container.settings.cloudApiSettings.first().asr },
-            save = { config -> container.settings.saveAsrApi(config) },
+            loadProvider = { container.settings.asrProvider() },
+            save = { config, provider -> container.settings.saveAsrApi(config, provider) },
             test = { config -> MimoAsrClient(endpointProvider = { config }).testConnection() }
         ))
         addView(section("文本模型"))
-        addView(endpointConfigurationCard(
+        addView(providerConfigurationCard(
+            isAsr = false,
             load = { container.settings.cloudApiSettings.first().text },
-            save = { config -> container.settings.saveTextApi(config) },
+            loadProvider = { container.settings.textProvider() },
+            save = { config, provider -> container.settings.saveTextApi(config, provider) },
             test = { config -> MimoTextPolisher(endpointProvider = { config }).testConnection() }
         ))
     }
@@ -879,21 +1138,79 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle(title).setView(body).setPositiveButton("关闭", null).show()
     }
 
-    private fun endpointConfigurationCard(
+    private fun providerConfigurationCard(
+        isAsr: Boolean,
         load: suspend () -> ModelEndpointConfig,
-        save: suspend (ModelEndpointConfig) -> Unit,
+        loadProvider: suspend () -> CloudProvider,
+        save: suspend (ModelEndpointConfig, CloudProvider) -> Unit,
         test: suspend (ModelEndpointConfig) -> Result<Unit>
     ) = card().apply {
         val url = field("接口地址")
         val apiKey = field("接口密钥").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-        val model = field("模型")
+        val model = field("模型名")
+        var selectedProvider = CloudProvider.CUSTOM
+        var previousCustomUrl = ""
+        val officialEndpoint = TextView(this@MainActivity).apply {
+            textSize = 13f
+            setTextColor(getColor(R.color.weike_muted))
+            setPadding(dp(2), 0, dp(2), dp(8))
+            visibility = View.GONE
+        }
+
         fun currentConfig() = ModelEndpointConfig(
             url = url.text.toString(),
             apiKey = apiKey.text.toString(),
             model = model.text.toString()
         )
+
+        fun applyProvider(provider: CloudProvider, replaceWithPreset: Boolean) {
+            selectedProvider = provider
+            val preset = cloudProviderPreset(provider, isAsr)
+            val builtIn = provider != CloudProvider.CUSTOM
+            url.visibility = if (builtIn) View.GONE else View.VISIBLE
+            officialEndpoint.visibility = if (builtIn) View.VISIBLE else View.GONE
+            if (builtIn) {
+                previousCustomUrl = url.text.toString().takeIf { it.isNotBlank() } ?: previousCustomUrl
+                officialEndpoint.text = "官方接口：${preset.url}"
+                if (replaceWithPreset) {
+                    url.setText(preset.url)
+                    model.setText(preset.model)
+                }
+            } else if (replaceWithPreset && url.text.isBlank()) {
+                url.setText(previousCustomUrl)
+            }
+        }
+
+        val picker = CloudProviderDropdown(this@MainActivity, selectedProvider) { provider ->
+            applyProvider(provider, replaceWithPreset = true)
+        }
+
+        lateinit var readModelsButton: Button
+        readModelsButton = formActionButton("读取模型", false) {
+            val config = currentConfig()
+            val validationError = cloudEndpointKeyValidationError(config)
+            if (validationError != null) {
+                Toast.makeText(this@MainActivity, validationError, Toast.LENGTH_SHORT).show()
+                return@formActionButton
+            }
+            readModelsButton.isEnabled = false
+            readModelsButton.text = "读取中"
+            lifecycleScope.launch {
+                val result = ModelCatalog().list(config)
+                readModelsButton.isEnabled = true
+                readModelsButton.text = "读取模型"
+                result.onSuccess { models ->
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("选择模型")
+                        .setItems(models.toTypedArray()) { _, index -> model.setText(models[index]) }
+                        .show()
+                }.onFailure { error ->
+                    Toast.makeText(this@MainActivity, error.message ?: "读取模型失败", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
         lateinit var testButton: Button
         testButton = formActionButton("测试连接", false) {
             val config = currentConfig()
@@ -923,19 +1240,26 @@ class MainActivity : AppCompatActivity() {
                 return@formActionButton
             }
             lifecycleScope.launch {
-                save(config)
+                save(config, selectedProvider)
                 Toast.makeText(this@MainActivity, "已保存", Toast.LENGTH_SHORT).show()
             }
         }
+        addView(picker, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(52), bottom = 12))
+        addView(officialEndpoint)
         addView(url)
         addView(apiKey)
         addView(model)
+        addView(readModelsButton, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(48), bottom = 8))
         addView(LinearLayout(this@MainActivity).apply {
             addView(testButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(8) })
             addView(saveButton, LinearLayout.LayoutParams(0, dp(48), 1f))
         })
         lifecycleScope.launch {
+            val provider = loadProvider()
             load().also { config ->
+                val resolvedProvider = inferCloudProvider(provider, config.url)
+                picker.setSelected(resolvedProvider)
+                applyProvider(resolvedProvider, replaceWithPreset = false)
                 url.setText(config.url)
                 apiKey.setText(config.apiKey)
                 model.setText(config.model)
@@ -943,11 +1267,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun cloudProviderPreset(provider: CloudProvider, isAsr: Boolean): ModelEndpointConfig = when (provider) {
+        CloudProvider.XIAOMI_MIMO -> ModelEndpointConfig(
+            url = "https://api.xiaomimimo.com/v1",
+            model = if (isAsr) "MiMo-V2.5-ASR" else "MiMo-V2.5"
+        )
+        CloudProvider.XIAOMI_MIMO_PLAN -> ModelEndpointConfig(
+            url = "https://token-plan-cn.xiaomimimo.com/v1",
+            model = if (isAsr) "MiMo-V2.5-ASR" else "MiMo-V2.5"
+        )
+        CloudProvider.CUSTOM -> ModelEndpointConfig()
+    }
+
+    private fun inferCloudProvider(saved: CloudProvider, url: String): CloudProvider = when {
+        saved != CloudProvider.CUSTOM -> saved
+        url.contains("token-plan-cn.xiaomimimo.com", ignoreCase = true) -> CloudProvider.XIAOMI_MIMO_PLAN
+        url.contains("api.xiaomimimo.com", ignoreCase = true) -> CloudProvider.XIAOMI_MIMO
+        else -> CloudProvider.CUSTOM
+    }
+
     private fun cloudConfigValidationError(config: ModelEndpointConfig): String? = runCatching {
         require(config.isComplete()) { "请完整填写接口信息" }
         require(config.apiKey.length <= 512 && config.apiKey.none(Char::isWhitespace)) { "接口密钥格式无效" }
         require(config.model.length <= 128 && config.model.none(Char::isWhitespace)) { "模型名称格式无效" }
         MimoApiConfig.chatCompletionsEndpoint(config.url)
+    }.exceptionOrNull()?.message
+
+    private fun cloudEndpointKeyValidationError(config: ModelEndpointConfig): String? = runCatching {
+        require(config.url.isNotBlank() && config.apiKey.isNotBlank()) { "请先填写接口地址和接口密钥" }
+        require(config.apiKey.length <= 512 && config.apiKey.none(Char::isWhitespace)) { "接口密钥格式无效" }
+        MimoApiConfig.modelsEndpoint(config.url)
     }.exceptionOrNull()?.message
 
     private fun buildSettings(): View = screen {
@@ -1671,7 +2020,11 @@ class MainActivity : AppCompatActivity() {
         trailing: View? = null,
         content: LinearLayout.() -> Unit = {}
     ) = card().apply {
-        guide?.let { addView(it, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, bottom = 12)) }
+        guide?.let {
+            val guideHeight = it.layoutParams?.height?.takeIf { height -> height > 0 }
+                ?: ViewGroup.LayoutParams.WRAP_CONTENT
+            addView(it, margins(ViewGroup.LayoutParams.MATCH_PARENT, guideHeight, bottom = 12))
+        }
         val titleRow = LinearLayout(this@MainActivity).apply { gravity = Gravity.CENTER_VERTICAL }
         titleRow.addView(TextView(this@MainActivity).apply {
             text = title
@@ -1685,25 +2038,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun operationGuide(vararg steps: String) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        background = roundedBackground(Color.rgb(244, 245, 247), 16)
-        setPadding(dp(14), dp(12), dp(14), dp(12))
-        addView(TextView(this@MainActivity).apply {
-            text = "操作指引"
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(pagePrimary)
-        })
-        steps.forEachIndexed { index, value ->
-            addView(TextView(this@MainActivity).apply {
-                text = value
-                textSize = 14f
-                gravity = Gravity.CENTER_VERTICAL
-                setTextColor(if (index == 0) getColor(R.color.weike_text) else getColor(R.color.weike_muted))
-                background = roundedBackground(Color.WHITE, 10)
-                setPadding(dp(12), 0, dp(12), 0)
-            }, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(30), top = 7))
-        }
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(2), 0, dp(2))
+        addView(View(this@MainActivity).apply {
+            background = roundedBackground(Color.rgb(18, 95, 142), 2)
+        }, LinearLayout.LayoutParams(dp(3), ViewGroup.LayoutParams.MATCH_PARENT).apply { marginEnd = dp(10) })
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            steps.filter { it.isNotBlank() }.forEachIndexed { index, value ->
+                addView(TextView(this@MainActivity).apply {
+                    text = value
+                    textSize = if (index == 0) 14f else 13f
+                    typeface = if (index == 0) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                    setTextColor(if (index == 0) getColor(R.color.weike_text) else getColor(R.color.weike_muted))
+                    setLineSpacing(dp(2).toFloat(), 1f)
+                }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, bottom = if (index == steps.lastIndex) 0 else 4))
+            }
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     private fun actionRow(title: String, detail: String, destructive: Boolean = false, action: () -> Unit) = LinearLayout(this).apply {

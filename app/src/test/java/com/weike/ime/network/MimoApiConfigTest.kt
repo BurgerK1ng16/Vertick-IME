@@ -30,6 +30,14 @@ class MimoApiConfigTest {
     }
 
     @Test
+    fun `normalizes any accepted endpoint to models endpoint`() {
+        assertEquals(
+            "https://token-plan-cn.xiaomimimo.com/v1/models",
+            MimoApiConfig.modelsEndpoint("https://token-plan-cn.xiaomimimo.com/v1/chat/completions")
+        )
+    }
+
+    @Test
     fun `rejects insecure endpoint`() {
         assertFailsWith<IllegalArgumentException> {
             MimoApiConfig.chatCompletionsEndpoint("http://example.com")

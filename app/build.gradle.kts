@@ -27,8 +27,8 @@ android {
         applicationId = "com.weike.ime"
         minSdk = 35
         targetSdk = 36
-        versionCode = 16
-        versionName = "1.3.1"
+        versionCode = 17
+        versionName = "1.3.2"
 
         ndk {
             // This app is intentionally built only for the user's Xiaomi 17 Pro.
@@ -123,9 +123,11 @@ private fun toT9(value: String): String = value.map { character ->
 val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
     val dictionaryDir = layout.projectDirectory.dir("src/main/assets/rime/cn_dicts")
     val readingData = layout.projectDirectory.file("src/main/assets/pinyin/pinyin.txt")
+    val essayData = layout.projectDirectory.file("src/main/assets/language/essay-zh-hans.txt")
     val output = layout.buildDirectory.file("generated/pinyinAssets/pinyin/full_pinyin_index.bin")
     inputs.dir(dictionaryDir)
     inputs.file(readingData)
+    inputs.file(essayData)
     outputs.file(output)
 
     doLast {
@@ -142,6 +144,21 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
             }
         }
 
+        // The essay list is a language-frequency source, not a pronunciation
+        // source. It intentionally never creates a new Pinyin key from per-char
+        // readings: doing so produces bad candidates for polyphonic phrases.
+        val essayWeights = HashMap<String, Int>(400_000)
+        essayData.asFile.bufferedReader().useLines { lines ->
+            lines.forEach lineLoop@ { line ->
+                if (line.isBlank() || line.startsWith('#')) return@lineLoop
+                val columns = line.split('\t')
+                if (columns.size < 2) return@lineLoop
+                val text = columns[0].trim()
+                val weight = columns[1].trim().toIntOrNull()?.coerceAtLeast(1) ?: return@lineLoop
+                if (text.isNotBlank()) essayWeights[text] = maxOf(essayWeights[text] ?: 0, weight)
+            }
+        }
+
         val sources = listOf("8105.dict.yaml", "base.dict.yaml", "ext.dict.yaml", "tencent.dict.yaml", "others.dict.yaml")
 
         val temporaryDirectory = layout.buildDirectory.dir("tmp/fullPinyinIndex").get().asFile.apply {
@@ -151,7 +168,7 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
         val bucketKeys = ("abcdefghijklmnopqrstuvwxyz".toList() + ('2'..'9').toList())
         fun bucketFor(key: String): Char = key.firstOrNull()?.takeIf { it in bucketKeys } ?: 'z'
         val bucketStreams = HashMap<String, DataOutputStream>()
-        fun writeTemporary(index: Int, key: String, textId: Int) {
+        fun writeTemporary(index: Int, key: String, textId: Int, weight: Int) {
             val bucket = bucketFor(key)
             val streamKey = "$index-$bucket"
             val stream = bucketStreams.getOrPut(streamKey) {
@@ -159,6 +176,7 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
             }
             stream.writeUTF(key)
             stream.writeInt(textId)
+            stream.writeInt(weight)
         }
 
         fun forEachEntry(consumer: (PinyinBuildEntry) -> Unit) {
@@ -178,7 +196,14 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
                         val code = syllables.joinToString("")
                         if (code.length > 48) return@lineLoop
                         val weightColumn = if (fallbackReading) columns.getOrNull(1) else columns.getOrNull(2)
-                        consumer(PinyinBuildEntry(text, code, syllables.joinToString("") { it.take(1) }, toT9(code), weightColumn?.toIntOrNull()?.coerceAtLeast(1) ?: 100))
+                        val sourceWeight = weightColumn?.toIntOrNull()?.coerceAtLeast(1) ?: 100
+                        consumer(PinyinBuildEntry(
+                            text,
+                            code,
+                            syllables.joinToString("") { it.take(1) },
+                            toT9(code),
+                            maxOf(sourceWeight, essayWeights[text] ?: 0)
+                        ))
                     }
                 }
             }
@@ -194,9 +219,9 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
                 textWeights += entry.weight
             }
             if (entry.weight > textWeights[textId]) textWeights[textId] = entry.weight
-            writeTemporary(0, entry.code, textId)
-            writeTemporary(1, entry.initials, textId)
-            writeTemporary(2, entry.t9, textId)
+            writeTemporary(0, entry.code, textId, entry.weight)
+            writeTemporary(1, entry.initials, textId, entry.weight)
+            writeTemporary(2, entry.t9, textId, entry.weight)
         }
         bucketStreams.values.forEach { it.close() }
         bucketStreams.clear()
@@ -206,7 +231,7 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
         RandomAccessFile(outputFile, "rw").use { file ->
             file.setLength(0)
             file.writeInt(0x56504934) // VPI4
-            file.writeInt(4)
+            file.writeInt(5)
             file.writeLong(0L) // shared text pool
             repeat(3) { file.writeLong(0L) }
             val poolStart = file.filePointer
@@ -244,6 +269,7 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
                             try {
                                 keys += input.readUTF()
                                 input.readInt()
+                                input.readInt()
                             } catch (_: java.io.EOFException) {
                                 break
                             }
@@ -258,19 +284,21 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
                 orderedBuckets.forEach { bucket ->
                     val source = File(temporaryDirectory, "$section-$bucket.bin")
                     if (!source.exists()) return@forEach
-                    val grouped = HashMap<String, MutableSet<Int>>()
+                    val grouped = HashMap<String, MutableMap<Int, Int>>()
                     DataInputStream(BufferedInputStream(source.inputStream(), 64 * 1024)).use { input ->
                         while (true) {
                             try {
                                 val key = input.readUTF()
                                 val textId = input.readInt()
-                                grouped.getOrPut(key) { HashSet() }.add(textId)
+                                val weight = input.readInt()
+                                val candidates = grouped.getOrPut(key) { HashMap() }
+                                candidates[textId] = maxOf(candidates[textId] ?: Int.MIN_VALUE, weight)
                             } catch (_: java.io.EOFException) {
                                 break
                             }
                         }
                     }
-                    grouped.entries.sortedBy { it.key }.forEach { (key, candidateIds) ->
+                    grouped.entries.sortedBy { it.key }.forEach { (key, candidateWeights) ->
                         val offset = file.filePointer
                         file.seek(offsetsPosition + entryIndex * Long.SIZE_BYTES)
                         file.writeLong(offset)
@@ -278,12 +306,13 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
                         val keyBytes = key.toByteArray(Charsets.UTF_8)
                         file.writeShort(keyBytes.size)
                         file.write(keyBytes)
-                        val candidates = candidateIds
-                            .sortedWith(compareByDescending<Int> { textWeights[it] }.thenBy { texts[it].length })
-                            .take(16)
+                        val candidates = candidateWeights.entries
+                            .sortedWith(compareByDescending<Map.Entry<Int, Int>> { it.value }.thenBy { texts[it.key].length })
+                            .take(24)
                         file.writeByte(candidates.size)
                         candidates.forEach { candidate ->
-                            file.writeInt(candidate)
+                            file.writeInt(candidate.key)
+                            file.writeInt(candidate.value)
                         }
                         entryIndex += 1
                     }
@@ -292,6 +321,7 @@ val generateFullPinyinIndex = tasks.register("generateFullPinyinIndex") {
             }
         }
         textIds.clear()
+        essayWeights.clear()
         temporaryDirectory.deleteRecursively()
         logger.lifecycle("Generated full offline Pinyin index: ${outputFile.length() / 1024 / 1024} MiB")
     }
@@ -303,7 +333,7 @@ val prepareRuntimeAssets = tasks.register<Sync>("prepareRuntimeAssets") {
     from(layout.projectDirectory.dir("src/main/assets")) {
         // Original Rime tables are build inputs, not runtime assets. The generated
         // index above is the only Pinyin lexicon shipped to users.
-        exclude("rime/**")
+        exclude("rime/**", "language/**")
     }
     into(layout.buildDirectory.dir("generated/runtimeAssets"))
 }

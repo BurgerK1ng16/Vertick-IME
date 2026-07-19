@@ -7,7 +7,7 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 
 /**
- * Read-only VPI4 dictionary stored in the APK. It is mapped directly from the
+ * Read-only VPI5 dictionary stored in the APK. It is mapped directly from the
  * uncompressed asset, so opening the IME does not parse YAML or build tables.
  */
 class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
@@ -101,7 +101,13 @@ class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
         var cursor = offset + Short.SIZE_BYTES + keyLength
         val count = buffer.get(cursor).toInt() and 0xff
         cursor += 1
-        return List(count) { readPoolEntry(buffer.getInt(cursor).also { cursor += Int.SIZE_BYTES }) }
+        return List(count) {
+            val id = buffer.getInt(cursor)
+            cursor += Int.SIZE_BYTES
+            val keyWeight = buffer.getInt(cursor)
+            cursor += Int.SIZE_BYTES
+            readPoolEntry(id).copy(weight = keyWeight)
+        }
     }
 
     private fun readPoolEntry(id: Int): IndexedCandidate {
@@ -123,8 +129,8 @@ class PrebuiltPinyinIndex private constructor(private val buffer: ByteBuffer) {
     data class IndexedKeyCandidates(val code: String, val candidates: List<IndexedCandidate>)
 
     companion object {
-        private const val MAGIC = 0x56504934 // VPI4
-        private const val VERSION = 4
+        private const val MAGIC = 0x56504934 // VPI4 family
+        private const val VERSION = 5
         private const val SECTION_COUNT = 3
         private const val POOL_OFFSET = Int.SIZE_BYTES * 2
         private const val SECTIONS_OFFSET = POOL_OFFSET + Long.SIZE_BYTES

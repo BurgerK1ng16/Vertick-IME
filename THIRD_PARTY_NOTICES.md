@@ -15,6 +15,15 @@
 - License: GPL-3.0-or-later
 - Used for: Chinese dictionaries and schema data under `app/src/main/assets/rime`.
 
+## rime-essay-simp
+
+- Upstream: https://github.com/rime/rime-essay-simp
+- Revision: `c3de118026871c566e1f6097a068cdf0f3e53c6f`
+- License: LGPL-3.0-or-later; the source lock and license are in
+  `third_party/rime-essay-simp`.
+- Used for: build-time high-frequency Simplified Chinese phrase weights in the
+  generated offline Pinyin index. The source data is not retained on device.
+
 ## cppjieba and jieba dictionaries
 
 - Upstream: https://github.com/yanyiwu/cppjieba and https://github.com/fxsjy/jieba

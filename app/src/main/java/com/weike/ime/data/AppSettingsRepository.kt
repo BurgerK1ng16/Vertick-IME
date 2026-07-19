@@ -44,6 +44,8 @@ class AppSettingsRepository(private val context: Context) {
     private val textUrlKey = stringPreferencesKey("text_api_url")
     private val textApiKeyKey = stringPreferencesKey("text_api_key")
     private val textModelKey = stringPreferencesKey("text_api_model")
+    private val asrProviderKey = stringPreferencesKey("asr_provider")
+    private val textProviderKey = stringPreferencesKey("text_provider")
     private val clipboardHistoryEnabledKey = booleanPreferencesKey("clipboard_history_enabled")
     private val secrets = SecureSecretStore(context)
     private val secretMigrationMutex = Mutex()
@@ -297,19 +299,37 @@ class AppSettingsRepository(private val context: Context) {
     }
 
     suspend fun saveAsrApi(config: ModelEndpointConfig) {
+        saveAsrApi(config, CloudProvider.CUSTOM)
+    }
+
+    suspend fun asrProvider(): CloudProvider = context.settingsDataStore.data.first().let { prefs ->
+        runCatching { CloudProvider.valueOf(prefs[asrProviderKey].orEmpty()) }.getOrDefault(CloudProvider.CUSTOM)
+    }
+
+    suspend fun saveAsrApi(config: ModelEndpointConfig, provider: CloudProvider) {
         secrets.write(SECURE_ASR_KEY, config.apiKey.trim())
         context.settingsDataStore.edit { prefs ->
             prefs[asrUrlKey] = config.url.trim()
             prefs[asrModelKey] = config.model.trim()
+            prefs[asrProviderKey] = provider.name
             prefs.remove(asrApiKeyKey)
         }
     }
 
     suspend fun saveTextApi(config: ModelEndpointConfig) {
+        saveTextApi(config, CloudProvider.CUSTOM)
+    }
+
+    suspend fun textProvider(): CloudProvider = context.settingsDataStore.data.first().let { prefs ->
+        runCatching { CloudProvider.valueOf(prefs[textProviderKey].orEmpty()) }.getOrDefault(CloudProvider.CUSTOM)
+    }
+
+    suspend fun saveTextApi(config: ModelEndpointConfig, provider: CloudProvider) {
         secrets.write(SECURE_TEXT_KEY, config.apiKey.trim())
         context.settingsDataStore.edit { prefs ->
             prefs[textUrlKey] = config.url.trim()
             prefs[textModelKey] = config.model.trim()
+            prefs[textProviderKey] = provider.name
             prefs.remove(textApiKeyKey)
         }
     }

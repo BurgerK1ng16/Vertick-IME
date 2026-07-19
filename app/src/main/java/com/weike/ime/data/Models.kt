@@ -28,6 +28,13 @@ enum class KeyboardTheme(val displayName: String) {
     SYSTEM("自适应系统")
 }
 
+/** Cloud provider choices shown independently for ASR and text generation. */
+enum class CloudProvider(val displayName: String) {
+    XIAOMI_MIMO("Xiaomi MiMo"),
+    XIAOMI_MIMO_PLAN("Xiaomi MiMo Plan"),
+    CUSTOM("自定义模型")
+}
+
 enum class ChineseKeyboardLayout(val displayName: String) {
     FULL("26键全键盘拼音"),
     NINE_KEY("九宫格拼音")

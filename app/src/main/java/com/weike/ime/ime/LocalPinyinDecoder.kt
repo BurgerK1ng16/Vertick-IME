@@ -3,6 +3,7 @@ package com.weike.ime.ime
 import android.content.Context
 import com.weike.ime.data.ChineseKeyboardLayout
 import com.weike.ime.data.LexiconTerm
+import com.weike.ime.data.PinyinLearning
 import com.weike.ime.data.TypingDictionaryEntry
 import java.text.Normalizer
 import java.util.Locale
@@ -21,6 +22,7 @@ class LocalPinyinDecoder(context: Context) {
     private var composition = ""
     private var layout = ChineseKeyboardLayout.FULL
     private var customEntries: List<IndexedTerm> = emptyList()
+    private var learnedEntries: Map<String, PinyinLearning> = emptyMap()
     private val readingByCharacter = AtomicReference<Map<Char, String>>(FALLBACK_READINGS)
     private val index = AtomicReference<PrebuiltPinyinIndex?>(null)
     private val lookupCache = ConcurrentHashMap<String, List<RankedText>>()
@@ -37,7 +39,8 @@ class LocalPinyinDecoder(context: Context) {
 
     suspend fun startSession(
         terms: List<LexiconTerm>,
-        typingDictionary: List<TypingDictionaryEntry> = emptyList()
+        typingDictionary: List<TypingDictionaryEntry> = emptyList(),
+        learning: List<PinyinLearning> = emptyList()
     ): Boolean {
         if (index.get() == null) {
             index.set(PrebuiltPinyinIndex.open(appContext))
@@ -45,6 +48,7 @@ class LocalPinyinDecoder(context: Context) {
             t9SyllablesByCode.set(emptyMap())
         }
         syncProfessionalTerms(terms, typingDictionary)
+        syncUserLearning(learning)
         return true
     }
 
@@ -123,7 +127,29 @@ class LocalPinyinDecoder(context: Context) {
         typingDictionary: List<TypingDictionaryEntry> = emptyList()
     ): Boolean = syncProfessionalTerms(terms, typingDictionary)
 
-    suspend fun clearUserLearning(): Boolean = true
+    suspend fun syncUserLearning(entries: List<PinyinLearning>): Boolean = synchronized(lock) {
+        learnedEntries = entries.associateBy { it.term }
+        true
+    }
+
+    suspend fun learnCandidate(text: String): Boolean = synchronized(lock) {
+        val value = text.trim()
+        // Do not turn an explicitly committed raw spelling such as `dfsh` into
+        // a learned Chinese candidate. Learning is limited to confirmed Han text.
+        if (value.isBlank() || value.none { it in '\u4e00'..'\u9fff' }) return@synchronized false
+        val previous = learnedEntries[value]
+        learnedEntries = learnedEntries + (value to PinyinLearning(
+            term = value,
+            useCount = (previous?.useCount ?: 0) + 1,
+            lastUsedAt = System.currentTimeMillis()
+        ))
+        true
+    }
+
+    suspend fun clearUserLearning(): Boolean = synchronized(lock) {
+        learnedEntries = emptyMap()
+        true
+    }
 
     suspend fun shutdown() {
         lookupCache.clear()
@@ -152,87 +178,81 @@ class LocalPinyinDecoder(context: Context) {
     private fun candidatesFor(raw: String): List<PinyinCandidate> {
         val query = normalizedCode(raw)
         if (query.isBlank()) return emptyList()
-        val results = ArrayList<RankedText>(MAX_CANDIDATES)
-        val seen = HashSet<String>()
-        fun add(text: String, score: Int) {
+        val results = LinkedHashMap<String, CandidateRank>()
+        fun add(text: String, score: Int, tier: MatchTier) {
             val value = text.trim()
-            if (value.isNotBlank() && seen.add(value) && results.size < MAX_CANDIDATES) {
-                results += RankedText(value, score)
-            }
+            if (value.isBlank()) return
+            val learnedBoost = learningBoost(value)
+            val next = CandidateRank(tier, score + learnedBoost)
+            val previous = results[value]
+            if (previous == null || next.isBetterThan(previous)) results[value] = next
         }
 
         customEntries.asSequence()
             .filter { matchesCode(query, it.code) || matchesCode(query, initialsFor(it.code)) }
             .sortedByDescending { it.weight }
-            .forEach { add(it.text, it.weight) }
+            .forEach { add(it.text, it.weight, MatchTier.DIRECT) }
 
         if (query.all(Char::isDigit)) {
-            t9Candidates(query).forEach { add(it.text, it.weight) }
-            coreT9Index[query].orEmpty().forEach { add(it.text, it.weight) }
+            t9Candidates(query).forEach { add(it.text, it.weight, MatchTier.DIRECT) }
+            coreT9Index[query].orEmpty().forEach { add(it.text, it.weight, MatchTier.DIRECT) }
             val segmentations = decodeT9Syllables(query)
-            sentenceCandidates(segmentations).forEach { add(it.text, it.weight) }
+            sentenceCandidates(segmentations).forEach { add(it.text, it.weight, MatchTier.SENTENCE) }
             segmentations.forEach { parts ->
                 combinations(parts, limit = 8).forEachIndexed { index, text ->
-                    add(text, 1_500_000 - index)
+                    add(text, 1_500_000 - index, MatchTier.SENTENCE)
                 }
             }
             if (results.isEmpty()) {
                 (minOf(query.length, MAX_T9_DIGITS_PER_SYLLABLE) downTo 2).forEach { length ->
-                    t9Candidates(query.takeLast(length)).forEach { add(it.text, it.weight - 200_000) }
+                    t9Candidates(query.takeLast(length)).forEach { add(it.text, it.weight - 200_000, MatchTier.COMPLETION) }
                 }
             }
-            if (results.isEmpty()) add(displayPreedit(query), -1)
-            return results.mapIndexed { index, value ->
-                PinyinCandidate(value.text, value.weight.toDouble(), index, directCommit = true)
-            }
+            if (results.isEmpty()) add(displayPreedit(query), -1, MatchTier.RAW)
+            return rankedCandidates(results)
         }
 
-        CORE_PHRASES[query].orEmpty().forEach { add(it.text, it.weight) }
-        fuzzyCorePhraseCandidates(query).forEach { add(it.text, it.weight) }
-        fullCandidates(query).forEach { add(it.text, it.weight) }
-        mixedInitialCandidates(query).forEach { add(it.text, it.weight) }
-        correctedFullCandidates(query).forEach { add(it.text, it.weight) }
-        // Exact keys are still first, but never make a single mistyped letter a
-        // dead end. This is a bounded candidate-code search, not a full scan.
-        fuzzyCandidates(query).forEach { add(it.text, it.weight) }
-        // Initials are a separate index. A short form such as wsm must match
-        // wei shen me (为什么) rather than being treated as an invalid syllable.
-        buildInitialIndex(CORE_PHRASES)[query].orEmpty().forEach { add(it.text, it.weight) }
-        initialCandidates(query).forEach { add(it.text, it.weight) }
-
-        if (query.all(Char::isDigit)) {
-            // T9 candidates must come from a segmented Pinyin sequence. Flattening
-            // every syllable sharing the same digits made 64 rank unrelated words
-            // above 你 (ni). Exact phrase codes are still promoted first.
-            t9Candidates(query).forEach { add(it.text, it.weight) }
-            buildT9Index(CORE_PHRASES)[query].orEmpty().forEach { add(it.text, it.weight) }
-            decodeT9Syllables(query).forEach { parts ->
-                combinations(parts, limit = 8).forEachIndexed { index, text ->
-                    add(text, 1_500_000 - index)
-                }
-            }
-            return results.mapIndexed { index, value ->
-                PinyinCandidate(value.text, value.weight.toDouble(), index, directCommit = true)
-            }
-        }
+        CORE_PHRASES[query].orEmpty().forEach { add(it.text, it.weight, MatchTier.DIRECT) }
+        fullCandidates(query).forEach { add(it.text, it.weight, MatchTier.DIRECT) }
+        buildInitialIndex(CORE_PHRASES)[query].orEmpty().forEach { add(it.text, it.weight, MatchTier.DIRECT) }
+        initialCandidates(query).forEach { add(it.text, it.weight, MatchTier.DIRECT) }
 
         val decoded = decodeSyllables(query)
-        sentenceCandidates(decoded).forEach { candidate -> add(candidate.text, candidate.weight) }
+        sentenceCandidates(decoded).forEach { candidate -> add(candidate.text, candidate.weight, MatchTier.SENTENCE) }
         decoded.forEach { parts ->
             combinations(parts, limit = 4).forEachIndexed { index, text ->
-                add(text, 100_000 - index)
+                add(text, 100_000 - index, MatchTier.SENTENCE)
             }
         }
 
         if (query.length == 1) {
-            initialCharacters(query[0]).forEach { add(it.text, it.weight) }
+            initialCharacters(query[0]).forEach { add(it.text, it.weight, MatchTier.DIRECT) }
         }
-        // Raw code is deliberately explicit and last. It keeps invalid or English
-        // abbreviations typeable without pretending that it is a Chinese match.
-        add(raw, -1)
-        return results.mapIndexed { index, value ->
-            PinyinCandidate(value.text, value.weight.toDouble(), index, directCommit = true)
+
+        // Completion expands a valid leading Pinyin fragment, while correction
+        // never outranks exact input. This keeps a real spelling stable but gives
+        // users a useful route out of a one-key typo or a mixed abbreviation.
+        fuzzyCandidates(query).forEach { add(it.text, it.weight, MatchTier.COMPLETION) }
+        mixedInitialCandidates(query).forEach { add(it.text, it.weight, MatchTier.CORRECTION) }
+        correctedFullCandidates(query).forEach { add(it.text, it.weight, MatchTier.CORRECTION) }
+        fuzzyCorePhraseCandidates(query).forEach { add(it.text, it.weight, MatchTier.CORRECTION) }
+        add(raw, -1, MatchTier.RAW)
+        return rankedCandidates(results)
+    }
+
+    private fun rankedCandidates(values: Map<String, CandidateRank>): List<PinyinCandidate> = values.entries
+        .sortedWith(compareBy<Map.Entry<String, CandidateRank>> { it.value.tier.order }
+            .thenByDescending { it.value.score }
+            .thenBy { it.key.length })
+        .take(MAX_CANDIDATES)
+        .mapIndexed { index, entry ->
+            PinyinCandidate(entry.key, entry.value.score.toDouble(), index, directCommit = true)
         }
+
+    private fun learningBoost(text: String): Int {
+        val learned = learnedEntries[text] ?: return 0
+        val frequency = kotlin.math.ln((learned.useCount.coerceAtLeast(1) + 1).toDouble())
+        return (frequency * LEARNING_SCORE_STEP).toInt().coerceAtMost(MAX_LEARNING_BOOST)
     }
 
     /**
@@ -257,7 +277,9 @@ class LocalPinyinDecoder(context: Context) {
                         val code = syllables.subList(beam.offset, end).joinToString("")
                         fullCandidates(code).take(MAX_WORD_OPTIONS).forEach { word ->
                             val wordScore = kotlin.math.ln((word.weight.coerceAtLeast(1) + 1).toDouble()) +
-                                (end - beam.offset) * WORD_LENGTH_BONUS
+                                (end - beam.offset) * WORD_LENGTH_BONUS +
+                                if (word.text.length == 1) SINGLE_CHARACTER_PENALTY else
+                                    (word.text.length - 1) * PHRASE_CHARACTER_BONUS
                             next += SentenceBeam(end, beam.text + word.text, beam.score + wordScore)
                         }
                     }
@@ -690,10 +712,22 @@ class LocalPinyinDecoder(context: Context) {
     private data class RankedText(val text: String, val weight: Int)
     private data class RankedCode(val code: String, val candidates: List<RankedText>)
     private data class SentenceBeam(val offset: Int, val text: String, val score: Double)
+    private data class CandidateRank(val tier: MatchTier, val score: Int) {
+        fun isBetterThan(other: CandidateRank): Boolean =
+            tier.order < other.tier.order || (tier == other.tier && score > other.score)
+    }
+
+    private enum class MatchTier(val order: Int) {
+        DIRECT(0),
+        SENTENCE(1),
+        COMPLETION(2),
+        CORRECTION(3),
+        RAW(4)
+    }
 
     companion object {
-        const val DICTIONARY_VERSION = "Full offline Pinyin index (base + ext + Tencent + 8105)"
-        private const val MAX_CANDIDATES = 18
+        const val DICTIONARY_VERSION = "Full offline Pinyin + phrase model (Rime-Ice + essay)"
+        private const val MAX_CANDIDATES = 24
         private const val MIN_FUZZY_QUERY_LENGTH = 3
         private const val MIN_CORRECTION_QUERY_LENGTH = 4
         private const val MAX_CORRECTION_QUERY_LENGTH = 24
@@ -702,9 +736,9 @@ class LocalPinyinDecoder(context: Context) {
         private const val MAX_MIXED_INITIAL_FORMS = 64
         private const val MAX_PREFIX_CACHE_ENTRIES = 128
         private const val MIN_PREFIX_LENGTH = 2
-        private const val MAX_PREFIX_BACKTRACK = 4
-        private const val MAX_PREFIX_RECORDS_PER_ANCHOR = 180
-        private const val MAX_FUZZY_CODE_RECORDS = 420
+        private const val MAX_PREFIX_BACKTRACK = 5
+        private const val MAX_PREFIX_RECORDS_PER_ANCHOR = 320
+        private const val MAX_FUZZY_CODE_RECORDS = 720
         private const val COMPLETION_SCORE_BONUS = 1_600_000
         private const val CORE_FUZZY_SCORE_BONUS = 2_000_000
         private const val CORE_FUZZY_DISTANCE_PENALTY = 450_000
@@ -712,17 +746,21 @@ class LocalPinyinDecoder(context: Context) {
         private const val CORRECTION_SCORE_BONUS = 650_000
         private const val FUZZY_SCORE_BONUS = 1_250_000
         private const val FUZZY_DISTANCE_PENALTY = 350_000
-        private const val MAX_SEGMENTATIONS = 6
+        private const val MAX_SEGMENTATIONS = 12
         private const val MAX_SYLLABLE_LENGTH = 6
         private const val MAX_T9_DIGITS_PER_SYLLABLE = 6
         private const val MAX_T9_SYLLABLES_PER_KEY = 8
         private const val MAX_T9_SEGMENTATION_CACHE = 128
-        private const val MAX_SENTENCE_SYLLABLES = 10
-        private const val MAX_WORD_SYLLABLES = 5
-        private const val MAX_WORD_OPTIONS = 4
-        private const val MAX_SENTENCE_BEAMS = 12
-        private const val WORD_LENGTH_BONUS = 0.34
+        private const val MAX_SENTENCE_SYLLABLES = 14
+        private const val MAX_WORD_SYLLABLES = 6
+        private const val MAX_WORD_OPTIONS = 8
+        private const val MAX_SENTENCE_BEAMS = 32
+        private const val WORD_LENGTH_BONUS = 0.46
+        private const val PHRASE_CHARACTER_BONUS = 0.12
+        private const val SINGLE_CHARACTER_PENALTY = -0.65
         private const val SCORE_SCALE = 10_000.0
+        private const val LEARNING_SCORE_STEP = 400_000.0
+        private const val MAX_LEARNING_BOOST = 1_400_000
         private val PINYIN_RE = Regex("^U\\+([0-9A-Fa-f]+):\\s*(.+)$")
         private val CORE_CHARACTERS: Map<String, List<RankedText>> = mapOf(
             "a" to listOf("啊", "阿", "呀"), "ai" to listOf("爱", "矮", "哎"),

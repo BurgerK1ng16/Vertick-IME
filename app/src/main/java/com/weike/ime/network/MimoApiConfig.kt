@@ -24,6 +24,12 @@ object MimoApiConfig {
         return url.toString().trimEnd('/')
     }
 
+    /** Resolves the OpenAI-compatible models listing endpoint from any accepted base form. */
+    fun modelsEndpoint(raw: String): String {
+        val chatEndpoint = chatCompletionsEndpoint(raw)
+        return chatEndpoint.removeSuffix("/chat/completions") + "/models"
+    }
+
     fun normalizedTextModel(raw: String): String {
         val value = raw.trim()
         if (value.isBlank()) return "mimo-v2.5"

@@ -38,4 +38,10 @@ class PrebuiltPinyinIndexTest {
         val dictionary = index()
         assertTrue(dictionary.full("zaiganma").any { it.text == "在干嘛" })
     }
+
+    @Test
+    fun directCommonGreetingRanksBeforeComposedCharacters() {
+        val dictionary = index()
+        assertTrue(dictionary.full("dajiahao").first().text == "大家好")
+    }
 }
