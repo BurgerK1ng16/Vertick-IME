@@ -31,6 +31,15 @@ data class PinyinLearning(
     val lastUsedAt: Long
 )
 
+/** A bounded local next-token association, never a full input history. */
+@Entity(tableName = "prediction_learning", primaryKeys = ["context", "target"])
+data class PredictionLearning(
+    val context: String,
+    val target: String,
+    val useCount: Int,
+    val lastUsedAt: Long
+)
+
 /** A user-owned entry that must rank ahead of general keyboard candidates. */
 @Entity(tableName = "typing_dictionary", primaryKeys = ["term"])
 data class TypingDictionaryEntry(
@@ -109,6 +118,32 @@ interface PinyinLearningDao {
         if (value.isBlank()) return
         val existing = find(value)
         upsert(PinyinLearning(value, (existing?.useCount ?: 0) + 1, now))
+        trimTo()
+    }
+}
+
+@Dao
+interface PredictionLearningDao {
+    @Query("SELECT * FROM prediction_learning WHERE context IN (:contexts) ORDER BY useCount DESC, lastUsedAt DESC LIMIT :limit")
+    suspend fun forContexts(contexts: List<String>, limit: Int = PREDICTION_LEARNING_QUERY_LIMIT): List<PredictionLearning>
+
+    @Query("SELECT * FROM prediction_learning WHERE context = :context AND target = :target LIMIT 1")
+    suspend fun find(context: String, target: String): PredictionLearning?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: PredictionLearning)
+
+    @Query("DELETE FROM prediction_learning")
+    suspend fun deleteAll()
+
+    @Query("DELETE FROM prediction_learning WHERE rowid NOT IN (SELECT rowid FROM prediction_learning ORDER BY useCount DESC, lastUsedAt DESC LIMIT :limit)")
+    suspend fun trimTo(limit: Int = PREDICTION_LEARNING_LIMIT)
+
+    @androidx.room.Transaction
+    suspend fun record(context: String, target: String, now: Long = System.currentTimeMillis()) {
+        if (context.isBlank() || target.isBlank()) return
+        val existing = find(context, target)
+        upsert(PredictionLearning(context, target, (existing?.useCount ?: 0) + 1, now))
         trimTo()
     }
 }
@@ -198,18 +233,20 @@ interface ClipboardDao {
         LexiconTerm::class,
         EnglishLearning::class,
         PinyinLearning::class,
+        PredictionLearning::class,
         TypingDictionaryEntry::class,
         UsageStats::class,
         InputHistory::class,
         ClipboardEntry::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class LexiconDatabase : RoomDatabase() {
     abstract fun lexiconDao(): LexiconDao
     abstract fun englishLearningDao(): EnglishLearningDao
     abstract fun pinyinLearningDao(): PinyinLearningDao
+    abstract fun predictionLearningDao(): PredictionLearningDao
     abstract fun typingDictionaryDao(): TypingDictionaryDao
     abstract fun usageStatsDao(): UsageStatsDao
     abstract fun inputHistoryDao(): InputHistoryDao
@@ -220,7 +257,7 @@ abstract class LexiconDatabase : RoomDatabase() {
 
         fun get(context: Context): LexiconDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, LexiconDatabase::class.java, "weike_lexicon.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build()
                 .also { instance = it }
         }
@@ -278,6 +315,16 @@ private val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
+private val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            "CREATE TABLE IF NOT EXISTS prediction_learning (context TEXT NOT NULL, target TEXT NOT NULL, useCount INTEGER NOT NULL, lastUsedAt INTEGER NOT NULL, PRIMARY KEY(context, target))"
+        )
+    }
+}
+
 private const val CLIPBOARD_LIMIT = 20
 private const val CLIPBOARD_RETENTION_MS = 24L * 60L * 60L * 1000L
 private const val PINYIN_LEARNING_LIMIT = 5_000
+private const val PREDICTION_LEARNING_LIMIT = 10_000
+private const val PREDICTION_LEARNING_QUERY_LIMIT = 96

@@ -38,4 +38,9 @@ if ($LASTEXITCODE -ne 0) { throw "librime_jni build failed" }
 $library = Get-ChildItem $buildRoot -Filter "librime_jni.so" -Recurse | Select-Object -First 1
 if ($null -eq $library) { throw "librime_jni.so was not produced" }
 
+$destination = Join-Path $projectRoot "app\src\main\jniLibs\$Abi\librime_jni.so"
+New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+Copy-Item -LiteralPath $library.FullName -Destination $destination -Force
+Write-Host "Copied $($library.FullName) to $destination"
+
 Write-Host "Built $($library.FullName)"

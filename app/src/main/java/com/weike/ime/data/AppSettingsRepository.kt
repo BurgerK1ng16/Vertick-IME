@@ -37,6 +37,10 @@ class AppSettingsRepository(private val context: Context) {
     private val keyboardModesKey = stringPreferencesKey("keyboard_modes")
     private val chineseKeyboardLayoutKey = stringPreferencesKey("chinese_keyboard_layout")
     private val nineKeySymbolsKey = stringPreferencesKey("nine_key_symbols")
+    private val keyboardStartupModeKey = stringPreferencesKey("keyboard_startup_mode")
+    private val keyboardLogoStyleKey = stringPreferencesKey("keyboard_logo_style")
+    private val keyboardLogoDarkPathKey = stringPreferencesKey("keyboard_logo_dark_path")
+    private val keyboardLogoLightPathKey = stringPreferencesKey("keyboard_logo_light_path")
     // Legacy plaintext keys are read once, migrated into SecureSecretStore, then deleted.
     private val asrUrlKey = stringPreferencesKey("asr_api_url")
     private val asrApiKeyKey = stringPreferencesKey("asr_api_key")
@@ -47,6 +51,9 @@ class AppSettingsRepository(private val context: Context) {
     private val asrProviderKey = stringPreferencesKey("asr_provider")
     private val textProviderKey = stringPreferencesKey("text_provider")
     private val clipboardHistoryEnabledKey = booleanPreferencesKey("clipboard_history_enabled")
+    private val quickImeSwitcherKey = booleanPreferencesKey("quick_ime_switcher")
+    private val predictionEnabledKey = booleanPreferencesKey("prediction_enabled")
+    private val predictionLearningEnabledKey = booleanPreferencesKey("prediction_learning_enabled")
     private val secrets = SecureSecretStore(context)
     private val secretMigrationMutex = Mutex()
     private var secretsMigrated = false
@@ -94,6 +101,18 @@ class AppSettingsRepository(private val context: Context) {
     val nineKeySymbols = context.settingsDataStore.data.map { prefs ->
         decodeNineKeySymbols(prefs[nineKeySymbolsKey].orEmpty())
     }
+    val keyboardStartupMode = context.settingsDataStore.data.map { prefs ->
+        runCatching { KeyboardStartupMode.valueOf(prefs[keyboardStartupModeKey].orEmpty()) }
+            .getOrDefault(KeyboardStartupMode.LAST_USED)
+    }
+    val keyboardLogo = context.settingsDataStore.data.map { prefs ->
+        KeyboardLogoConfig(
+            style = runCatching { KeyboardLogoStyle.valueOf(prefs[keyboardLogoStyleKey].orEmpty()) }
+                .getOrDefault(KeyboardLogoStyle.VERTICK),
+            darkPath = prefs[keyboardLogoDarkPathKey].orEmpty(),
+            lightPath = prefs[keyboardLogoLightPathKey].orEmpty()
+        )
+    }
     val cloudApiSettings = flow {
         migrateCloudSecrets()
         emitAll(context.settingsDataStore.data.map { prefs ->
@@ -101,18 +120,31 @@ class AppSettingsRepository(private val context: Context) {
                 asr = ModelEndpointConfig(
                     prefs[asrUrlKey].orEmpty(),
                     secrets.read(SECURE_ASR_KEY).orEmpty(),
-                    prefs[asrModelKey].orEmpty()
+                    prefs[asrModelKey].orEmpty(),
+                    runCatching { CloudProvider.valueOf(prefs[asrProviderKey].orEmpty()) }
+                        .getOrDefault(CloudProvider.CUSTOM)
                 ),
                 text = ModelEndpointConfig(
                     prefs[textUrlKey].orEmpty(),
                     secrets.read(SECURE_TEXT_KEY).orEmpty(),
-                    prefs[textModelKey].orEmpty()
+                    prefs[textModelKey].orEmpty(),
+                    runCatching { CloudProvider.valueOf(prefs[textProviderKey].orEmpty()) }
+                        .getOrDefault(CloudProvider.CUSTOM)
                 )
             )
         })
     }
     val clipboardHistoryEnabled = context.settingsDataStore.data.map { prefs ->
         prefs[clipboardHistoryEnabledKey] ?: false
+    }
+    val quickImeSwitcherEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[quickImeSwitcherKey] ?: false
+    }
+    val predictionEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[predictionEnabledKey] ?: true
+    }
+    val predictionLearningEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[predictionLearningEnabledKey] ?: true
     }
 
     suspend fun styleFor(packageName: String): WritingStyle {
@@ -180,6 +212,18 @@ class AppSettingsRepository(private val context: Context) {
     suspend fun saveDoubleSpacePeriod(enabled: Boolean) {
         startupPreferences.edit().putBoolean(STARTUP_DOUBLE_SPACE_PERIOD, enabled).apply()
         context.settingsDataStore.edit { prefs -> prefs[doubleSpacePeriodKey] = enabled }
+    }
+
+    suspend fun predictionEnabled(): Boolean = predictionEnabled.first()
+
+    suspend fun savePredictionEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[predictionEnabledKey] = enabled }
+    }
+
+    suspend fun predictionLearningEnabled(): Boolean = predictionLearningEnabled.first()
+
+    suspend fun savePredictionLearningEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[predictionLearningEnabledKey] = enabled }
     }
 
     suspend fun historyRetention(): HistoryRetention = historyRetention.first()
@@ -292,10 +336,32 @@ class AppSettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { prefs -> prefs[nineKeySymbolsKey] = normalized.joinToString("\n") }
     }
 
+    suspend fun keyboardStartupMode(): KeyboardStartupMode = keyboardStartupMode.first()
+
+    suspend fun saveKeyboardStartupMode(mode: KeyboardStartupMode) {
+        context.settingsDataStore.edit { prefs -> prefs[keyboardStartupModeKey] = mode.name }
+    }
+
+    suspend fun keyboardLogo(): KeyboardLogoConfig = keyboardLogo.first()
+
+    suspend fun saveKeyboardLogo(config: KeyboardLogoConfig) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[keyboardLogoStyleKey] = config.style.name
+            prefs[keyboardLogoDarkPathKey] = config.darkPath
+            prefs[keyboardLogoLightPathKey] = config.lightPath
+        }
+    }
+
     suspend fun clipboardHistoryEnabled(): Boolean = clipboardHistoryEnabled.first()
 
     suspend fun saveClipboardHistoryEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { prefs -> prefs[clipboardHistoryEnabledKey] = enabled }
+    }
+
+    suspend fun quickImeSwitcherEnabled(): Boolean = quickImeSwitcherEnabled.first()
+
+    suspend fun saveQuickImeSwitcherEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[quickImeSwitcherKey] = enabled }
     }
 
     suspend fun saveAsrApi(config: ModelEndpointConfig) {

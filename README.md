@@ -19,6 +19,15 @@ Vertick IME is an open-source Chinese input method for Android 15 and later. It 
 ## Features and Privacy
 
 - Offline Pinyin candidates and on-device learning powered by Rime-Ice.
+- The built-in `8105 + base + others` package is precompiled before release,
+  so first use opens a verified table instead of compiling a dictionary on the
+  phone. Optional extension, English, Emoji, and Wanxiang grammar packages are
+  downloaded only after the user explicitly enables them. Downloads are
+  checksum-verified and never replace a working package until validation succeeds.
+- Local next-word suggestions appear only after composition is complete. Their
+  compact indexes are derived from redistributable Rime-Ice data; optional local
+  pair learning is bounded, can be cleared, and never stores a browsable input
+  history, raw Pinyin, recordings, or cloud text.
 - MiMo ASR for speech recognition; text models use the OpenAI Chat Completions-compatible protocol.
 - Cloud endpoints are configured inside the app. Secrets are protected with Android Keystore and are never written to source code, build arguments, or logs.
 - Dictation history is disabled by default. Clipboard history is also disabled by default; when enabled, it stores at most 20 non-sensitive items for up to 24 hours.
@@ -35,7 +44,8 @@ See [PRIVACY.md](PRIVACY.md) for data boundaries and [SECURITY.md](SECURITY.md) 
 
 ## Highlights
 
-- **Dictation**: sends speech to an ASR model and inserts text directly; streaming ASR is supported.
+- **Dictation**: sends speech to an ASR model, applies local punctuation cleanup,
+  and commits the completed result once.
 - **Polish**: transcribes audio with ASR, then organizes the text with a text model and focused prompts.
 
 ![Dictation and polish](https://edgeoneimg.cdn.sn/i/6a5747055be0d_1784104709.webp "Dictation and polish")

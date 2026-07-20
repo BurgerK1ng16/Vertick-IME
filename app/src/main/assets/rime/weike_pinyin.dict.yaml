@@ -4,12 +4,9 @@ name: weike_pinyin
 version: '2026.07'
 sort: by_weight
 import_tables:
-  # Keep the complete Rime-Ice tables direct. Some Android librime builds do
-  # not reliably expand a second-level import during deployment.
+  # Default package: lightweight Rime-Ice base. Extension, Tencent, English,
+  # Emoji and Wanxiang bundles are compiled by CI as separate complete packs.
   - cn_dicts/8105
   - cn_dicts/base
-  - cn_dicts/ext
-  - cn_dicts/tencent
   - cn_dicts/others
-  - weike_terms
 ...

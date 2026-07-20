@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+schema:
+  schema_id: weike_pinyin
+  name: Vertick Pinyin
+  version: '2026.07.20-wanxiang'
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [ Chinese, English ]
+  - name: emoji
+    reset: 1
+    states: [ Emoji, Emoji ]
+
+engine:
+  processors:
+    - speller
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - matcher
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - script_translator
+    - table_translator@melt_eng
+  filters:
+    - simplifier@emoji
+    - uniquifier
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+  algebra:
+    - abbrev/^([a-z]).+$/$1/
+    - abbrev/^([zcs]h).+$/$1/
+    - derive/^([nl])ue$/$1ve/
+    - derive/^([jqxy])u$/$1v/
+    - derive/un$/uen/
+    - derive/ui$/uei/
+    - derive/iu$/iou/
+    - derive/([aeiou])ng$/$1gn/
+
+translator:
+  dictionary: weike_pinyin
+  enable_sentence: true
+  enable_encoder: true
+  max_phrase_length: 8
+  enable_completion: true
+  enable_user_dict: true
+  initial_quality: 1.2
+  contextual_suggestions: false
+  max_homophones: 8
+
+melt_eng:
+  dictionary: melt_eng
+  enable_sentence: false
+  enable_user_dict: false
+  initial_quality: 0.95
+
+emoji:
+  option_name: emoji
+  opencc_config: emoji.json
+  inherit_comment: false
+
+grammar:
+  language: wanxiang-lts-zh-hans
+  collocation_max_length: 6
+  collocation_min_length: 3
+  collocation_penalty: -14
+  non_collocation_penalty: -6
+  weak_collocation_penalty: -100
+  rear_penalty: -20

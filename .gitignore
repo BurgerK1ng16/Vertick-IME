@@ -16,4 +16,5 @@ third_party/sources/
 *.raw
 tmp_*.json
 build-*.log
+/dictionaries/dist/
 *.iml

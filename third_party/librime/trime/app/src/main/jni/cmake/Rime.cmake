@@ -22,6 +22,7 @@ endif()
 
 option(BUILD_TEST "" OFF)
 option(BUILD_STATIC "" ON)
+option(BUILD_RIME_DEPLOYER "Build the precompiled dictionary tool" OFF)
 add_subdirectory(librime)
 target_compile_options(
   rime-static PRIVATE "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=." "-Wno-error=deprecated-declarations")
@@ -31,3 +32,9 @@ target_compile_options(
 
 target_compile_options(
   rime-octagram-objs PRIVATE "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.")
+
+# Static Android builds normally omit desktop tools. This target is used only
+# by the release-pack pipeline and is never included in the APK.
+if(BUILD_RIME_DEPLOYER)
+  add_subdirectory(librime/tools)
+endif()

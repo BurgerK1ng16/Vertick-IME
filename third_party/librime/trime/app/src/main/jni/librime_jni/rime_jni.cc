@@ -55,7 +55,13 @@ class Rime {
     rime->setup(&trime_traits);
     rime->initialize(&trime_traits);
     rime->set_notification_handler(notificationHandler, GlobalRef->jvm);
-    rime->start_maintenance(fullCheck);
+    // The IME ships an already deployed schema/table/prism bundle. Calling
+    // start_maintenance(false) still schedules config and prism work in
+    // librime, which overwrites that bundle with an empty user-side index on
+    // first launch. Maintenance is opt-in for explicit repair operations.
+    if (fullCheck) {
+      rime->start_maintenance(true);
+    }
   }
 
   bool deploySchema(std::string_view schemaFile) {

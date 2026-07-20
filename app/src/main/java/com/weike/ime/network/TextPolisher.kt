@@ -3,6 +3,7 @@ package com.weike.ime.network
 import com.weike.ime.data.LexiconTerm
 import com.weike.ime.data.ModelEndpointConfig
 import com.weike.ime.data.PunctuationPreference
+import com.weike.ime.data.TextProviderProtocol
 import com.weike.ime.data.WritingStyle
 import com.weike.ime.text.StructuredExpressionFormatter
 import kotlinx.coroutines.CancellationException
@@ -87,13 +88,8 @@ class MimoTextPolisher(
                 stream = false
             )
             Result.success(client.newCall(request).awaitBody { response ->
-                check(response.isSuccessful) { MimoApiConfig.responseError(response, "MiMo 快速润色失败") }
-                extractMessageContent(
-                    JSONObject(response.body?.string().orEmpty())
-                        .getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                ).ifBlank { text }
+                check(response.isSuccessful) { MimoApiConfig.responseError(response, "文本模型快速润色失败") }
+                extractResponseContent(JSONObject(response.body?.string().orEmpty()), endpoint).ifBlank { text }
             })
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -129,13 +125,8 @@ class MimoTextPolisher(
                 stream = false
             )
             Result.success(client.newCall(request).awaitBody { response ->
-                check(response.isSuccessful) { MimoApiConfig.responseError(response, "MiMo 请求失败") }
-                extractMessageContent(
-                    JSONObject(response.body?.string().orEmpty())
-                        .getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                ).ifBlank { text }
+                check(response.isSuccessful) { MimoApiConfig.responseError(response, "文本模型请求失败") }
+                extractResponseContent(JSONObject(response.body?.string().orEmpty()), endpoint).ifBlank { text }
             })
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -179,12 +170,12 @@ class MimoTextPolisher(
                 override fun onResponse(call: Call, response: okhttp3.Response) {
                     response.use { streamedResponse ->
                         if (!streamedResponse.isSuccessful) {
-                            close(IOException(MimoApiConfig.responseError(streamedResponse, "MiMo 请求失败")))
+                            close(IOException(MimoApiConfig.responseError(streamedResponse, "文本模型请求失败")))
                             return
                         }
                         val source = streamedResponse.body?.source()
                         if (source == null) {
-                            close(IOException("MiMo 未返回润色内容"))
+                            close(IOException("文本模型未返回润色内容"))
                             return
                         }
                         while (true) {
@@ -195,7 +186,7 @@ class MimoTextPolisher(
                                 close()
                                 return
                             }
-                            val delta = extractDeltaContent(JSONObject(payload))
+                            val delta = extractStreamDelta(JSONObject(payload), endpoint)
                             if (delta.isNotEmpty()) trySend(delta)
                         }
                         close()
@@ -237,12 +228,12 @@ class MimoTextPolisher(
                 override fun onResponse(call: Call, response: okhttp3.Response) {
                     response.use { streamedResponse ->
                         if (!streamedResponse.isSuccessful) {
-                            close(IOException(MimoApiConfig.responseError(streamedResponse, "MiMo request failed")))
+                            close(IOException(MimoApiConfig.responseError(streamedResponse, "Text model request failed")))
                             return
                         }
                         val source = streamedResponse.body?.source()
                         if (source == null) {
-                            close(IOException("MiMo returned an empty response"))
+                            close(IOException("Text model returned an empty response"))
                             return
                         }
                         while (true) {
@@ -253,7 +244,7 @@ class MimoTextPolisher(
                                 close()
                                 return
                             }
-                            val delta = extractDeltaContent(JSONObject(payload))
+                            val delta = extractStreamDelta(JSONObject(payload), endpoint)
                             if (delta.isNotEmpty()) trySend(delta)
                         }
                         close()
@@ -276,13 +267,8 @@ class MimoTextPolisher(
                 stream = false
             )
             Result.success(client.newCall(request).awaitBody { response ->
-                check(response.isSuccessful) { MimoApiConfig.responseError(response, "MiMo 翻译失败") }
-                extractMessageContent(
-                    JSONObject(response.body?.string().orEmpty())
-                        .getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                ).ifBlank { text }
+                check(response.isSuccessful) { MimoApiConfig.responseError(response, "文本模型翻译失败") }
+                extractResponseContent(JSONObject(response.body?.string().orEmpty()), endpoint).ifBlank { text }
             })
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -298,28 +284,40 @@ class MimoTextPolisher(
         temperature: Double,
         stream: Boolean
     ): Request {
-        val messages = JSONArray()
-            .put(JSONObject().put("role", "system").put("content", systemPrompt))
-            .put(JSONObject().put("role", "user").put("content", userText))
-        val body = JSONObject()
-            .put("model", MimoApiConfig.normalizedTextModel(endpoint.model))
-            .put("temperature", temperature)
-            .put("messages", messages)
-            .apply { if (stream) put("stream", true) }
-            .toString()
-            .toRequestBody("application/json; charset=utf-8".toMediaType())
-        val resolvedEndpoint = MimoApiConfig.chatCompletionsEndpoint(endpoint.url)
-        return Request.Builder()
-            .url(resolvedEndpoint)
-            .apply {
-                if (MimoApiConfig.usesMimoApiKeyHeader(resolvedEndpoint)) {
-                    header("api-key", endpoint.apiKey)
-                } else {
-                    header("Authorization", "Bearer ${endpoint.apiKey}")
-                }
+        val selectedModel = MimoApiConfig.normalizedTextModel(endpoint.model)
+        val (resolvedEndpoint, payload) = when (endpoint.provider.textProtocol) {
+            TextProviderProtocol.OPENAI_CHAT -> {
+                val messages = JSONArray()
+                    .put(JSONObject().put("role", "system").put("content", systemPrompt))
+                    .put(JSONObject().put("role", "user").put("content", userText))
+                MimoApiConfig.chatCompletionsEndpoint(endpoint.url) to JSONObject()
+                    .put("model", selectedModel)
+                    .put("temperature", temperature)
+                    .put("messages", messages)
+                    .apply { if (stream) put("stream", true) }
             }
-            .post(body)
-            .build()
+            TextProviderProtocol.ANTHROPIC_MESSAGES -> {
+                MimoApiConfig.anthropicMessagesEndpoint(endpoint.url) to JSONObject()
+                    .put("model", selectedModel)
+                    .put("max_tokens", 1024)
+                    .put("temperature", temperature)
+                    .put("system", systemPrompt)
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", userText)))
+                    .apply { if (stream) put("stream", true) }
+            }
+            TextProviderProtocol.GEMINI_GENERATE_CONTENT -> {
+                MimoApiConfig.geminiGenerateContentEndpoint(endpoint.url, selectedModel, stream) to JSONObject()
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+                    .put("contents", JSONArray().put(JSONObject()
+                        .put("role", "user")
+                        .put("parts", JSONArray().put(JSONObject().put("text", userText)))))
+                    .put("generationConfig", JSONObject().put("temperature", temperature))
+            }
+        }
+        val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        return MimoApiConfig.applyAuthorization(
+            Request.Builder().url(resolvedEndpoint).post(body), endpoint.provider, endpoint.apiKey
+        ).build()
     }
 
     suspend fun testConnection(): Result<Unit> {
@@ -398,6 +396,20 @@ class MimoTextPolisher(
         }.trim()
     }
 
+    private fun extractResponseContent(response: JSONObject, endpoint: ModelEndpointConfig): String = when (endpoint.provider.textProtocol) {
+        TextProviderProtocol.OPENAI_CHAT -> extractMessageContent(
+            response.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message") ?: JSONObject()
+        )
+        TextProviderProtocol.ANTHROPIC_MESSAGES -> extractMessageContent(response)
+        TextProviderProtocol.GEMINI_GENERATE_CONTENT -> {
+            val parts = response.optJSONArray("candidates")
+                ?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
+            buildString {
+                repeat(parts.length()) { index -> parts.optJSONObject(index)?.optText("text")?.let(::append) }
+            }
+        }
+    }
+
     private fun extractDeltaContent(payload: JSONObject): String {
         val delta = payload.optJSONArray("choices")
             ?.optJSONObject(0)
@@ -411,6 +423,24 @@ class MimoTextPolisher(
                 val item = array.optJSONObject(index) ?: return@repeat
                 val text = item.optText("text").ifBlank { item.optText("content") }
                 if (text.isNotBlank()) append(text)
+            }
+        }
+    }
+
+    private fun extractStreamDelta(payload: JSONObject, endpoint: ModelEndpointConfig): String = when (endpoint.provider.textProtocol) {
+        TextProviderProtocol.OPENAI_CHAT -> extractDeltaContent(payload)
+        TextProviderProtocol.ANTHROPIC_MESSAGES -> {
+            if (payload.optString("type") == "content_block_delta") {
+                payload.optJSONObject("delta")?.optText("text").orEmpty()
+            } else {
+                ""
+            }
+        }
+        TextProviderProtocol.GEMINI_GENERATE_CONTENT -> {
+            val parts = payload.optJSONArray("candidates")
+                ?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
+            buildString {
+                repeat(parts.length()) { index -> parts.optJSONObject(index)?.optText("text")?.let(::append) }
             }
         }
     }

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0 - 2026-07-21
+
+### English
+
+- Rebuilt offline Chinese input around librime and precompiled Rime-Ice tables. Full Pinyin and nine-key input now share the native candidate engine, verified base package, and local user learning path.
+- Added optional checksum-verified enhanced dictionary downloads plus an independent Wanxiang long-sentence grammar package. A failed download or validation never replaces the active offline package.
+- Added fully offline next-word suggestions and bounded local word-pair learning. Predictions are derived from redistributable dictionary data and are never sent to a cloud service or stored as a browsable input history.
+- Consolidated the management experience, expanded cloud model configuration, and removed unreachable legacy pages and unused release resources.
+- Hardened release documentation, dependency notices, dictionary provenance, and privacy boundaries for public distribution.
+
+### 简体中文
+
+- 以 librime 与预编译 Rime-Ice 表重构离线中文输入。全键盘拼音和九宫格共用原生候选引擎、已校验的基础词典包和本机学习链路。
+- 新增带校验的增强词典下载，以及独立的万象长句语法包。下载或校验失败不会替换当前可用的离线词典。
+- 新增完全离线的联想词和有上限的本机词对学习。预测索引来自可再分发词典数据，不会请求云端，也不会保存可浏览的完整输入历史。
+- 整合管理页与云端模型配置，删除不可达旧页面和未使用的发布资源。
+- 补强公开发布所需的文档、第三方声明、词典来源说明与隐私边界。
+
 ## 1.3.2 - 2026-07-20
 
 ### English

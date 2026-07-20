@@ -19,10 +19,25 @@ target_link_libraries(rime_console ${rime_console_deps})
 set(rime_deployer_src "rime_deployer.cc")
 add_executable(rime_deployer ${rime_deployer_src})
 target_compile_definitions(rime_deployer PRIVATE RIME_IMPORTS)
+target_include_directories(rime_deployer PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/../src
+  ${PROJECT_BINARY_DIR}/librime/src
+  ${PROJECT_BINARY_DIR}/librime/deps/glog
+  ${CMAKE_CURRENT_LIST_DIR}/../deps/glog/src
+  ${CMAKE_CURRENT_LIST_DIR}/../deps/marisa-trie/include
+  ${PROJECT_BINARY_DIR}/include
+  ${CMAKE_CURRENT_LIST_DIR}/../deps/yaml-cpp/include
+  ${CMAKE_CURRENT_LIST_DIR}/../deps/leveldb/include
+  ${PROJECT_BINARY_DIR}/snappy
+  ${CMAKE_SOURCE_DIR}/snappy
+  ${CMAKE_SOURCE_DIR}/OpenCC/src)
+file(GLOB RIME_BOOST_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/boost/libs/*/include")
+target_include_directories(rime_deployer PRIVATE ${RIME_BOOST_INCLUDE_DIRS})
 target_link_libraries(rime_deployer
-  ${rime_library}
-  ${rime_dict_library}
-  ${rime_levers_library})
+  glog_internal
+  rime-static
+  log)
+
 
 set(rime_dict_manager_src "rime_dict_manager.cc")
 add_executable(rime_dict_manager ${rime_dict_manager_src})
@@ -53,17 +68,20 @@ if(NOT WIN32 OR NOT BUILD_SHARED_LIBS)
   install(TARGETS rime_table_decompiler DESTINATION ${BIN_INSTALL_DIR})
 endif()
 
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/default.yaml
+# When embedded under Trime, PROJECT_SOURCE_DIR is the JNI root rather than
+# librime itself. Resolve these tool-only sample files from this directory.
+set(RIME_MINIMAL_DATA_DIR ${CMAKE_CURRENT_LIST_DIR}/../data/minimal)
+file(COPY ${RIME_MINIMAL_DATA_DIR}/default.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/symbols.yaml
+file(COPY ${RIME_MINIMAL_DATA_DIR}/symbols.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/essay.txt
+file(COPY ${RIME_MINIMAL_DATA_DIR}/essay.txt
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/luna_pinyin.dict.yaml
+file(COPY ${RIME_MINIMAL_DATA_DIR}/luna_pinyin.dict.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/luna_pinyin.schema.yaml
+file(COPY ${RIME_MINIMAL_DATA_DIR}/luna_pinyin.schema.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/cangjie5.dict.yaml
+file(COPY ${RIME_MINIMAL_DATA_DIR}/cangjie5.dict.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})
-file(COPY ${PROJECT_SOURCE_DIR}/data/minimal/cangjie5.schema.yaml
+file(COPY ${RIME_MINIMAL_DATA_DIR}/cangjie5.schema.yaml
      DESTINATION ${EXECUTABLE_OUTPUT_PATH})

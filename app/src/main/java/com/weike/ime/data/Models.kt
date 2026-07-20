@@ -28,12 +28,48 @@ enum class KeyboardTheme(val displayName: String) {
     SYSTEM("自适应系统")
 }
 
-/** Cloud provider choices shown independently for ASR and text generation. */
-enum class CloudProvider(val displayName: String) {
-    XIAOMI_MIMO("Xiaomi MiMo"),
-    XIAOMI_MIMO_PLAN("Xiaomi MiMo Plan"),
-    CUSTOM("自定义模型")
+/**
+ * Text providers supported by the cloud configuration screen.
+ *
+ * The ASR picker intentionally exposes only MiMo and Custom: normal text-model
+ * endpoints are not interchangeable with the MiMo audio chat protocol.
+ */
+enum class CloudProvider(
+    val displayName: String,
+    val iconResourceName: String? = null,
+    val textProtocol: TextProviderProtocol = TextProviderProtocol.OPENAI_CHAT,
+    val endpointPreset: String = "",
+    val defaultTextModel: String = "",
+    val endpointRequiresUserValue: Boolean = false
+) {
+    XIAOMI_MIMO("Xiaomi MiMo", null, TextProviderProtocol.OPENAI_CHAT, "https://api.xiaomimimo.com/v1", "MiMo-V2.5"),
+    XIAOMI_MIMO_PLAN("Xiaomi MiMo Plan", null, TextProviderProtocol.OPENAI_CHAT, "https://token-plan-cn.xiaomimimo.com/v1", "MiMo-V2.5"),
+    OPENAI("OpenAI", "provider_openai", TextProviderProtocol.OPENAI_CHAT, "https://api.openai.com/v1"),
+    ZHIPU("\u667a\u8c31", "provider_zhipu", TextProviderProtocol.OPENAI_CHAT, "https://open.bigmodel.cn/api/paas/v4"),
+    QWEN("\u5343\u95ee", "provider_qwen", TextProviderProtocol.OPENAI_CHAT, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    DOUBAO("\u8c46\u5305", "provider_doubao", TextProviderProtocol.OPENAI_CHAT, "https://ark.cn-beijing.volces.com/api/v3"),
+    AIHUBMIX("\u63a8\u7406\u65f6\u4ee3", "provider_aihubmix", TextProviderProtocol.OPENAI_CHAT, "https://aihubmix.com/v1"),
+    ALIBABA_CLOUD("\u963f\u91cc\u4e91", "provider_alibaba_cloud", TextProviderProtocol.OPENAI_CHAT, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+    BAIDU_CLOUD("\u767e\u5ea6\u667a\u80fd\u4e91", "provider_baidu_cloud", TextProviderProtocol.OPENAI_CHAT, "https://qianfan.baidubce.com/v2"),
+    BAILIAN("\u963f\u91cc\u4e91\u767e\u70bc", "provider_bailian", TextProviderProtocol.OPENAI_CHAT, "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    CLOUDFLARE("Cloudflare", "provider_cloudflare", TextProviderProtocol.OPENAI_CHAT, "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1", endpointRequiresUserValue = true),
+    // CodeBuddy does not publish one stable public data-plane endpoint. Keep it
+    // selectable, but require the endpoint supplied by the user's workspace.
+    CODEBUDDY("CodeBuddy", "provider_codebuddy", TextProviderProtocol.OPENAI_CHAT, endpointRequiresUserValue = true),
+    DEEPSEEK("DeepSeek", "provider_deepseek", TextProviderProtocol.OPENAI_CHAT, "https://api.deepseek.com/v1"),
+    HUNYUAN("\u817e\u8baf\u6df7\u5143", "provider_hunyuan", TextProviderProtocol.OPENAI_CHAT, "https://api.hunyuan.cloud.tencent.com/v1"),
+    SILICON_CLOUD("SiliconCloud", "provider_siliconcloud", TextProviderProtocol.OPENAI_CHAT, "https://api.siliconflow.cn/v1"),
+    WENXIN("\u6587\u5fc3\u4e00\u8a00", "provider_wenxin", TextProviderProtocol.OPENAI_CHAT, "https://qianfan.baidubce.com/v2"),
+    VOLCENGINE("\u706b\u5c71\u5f15\u64ce", "provider_volcengine", TextProviderProtocol.OPENAI_CHAT, "https://ark.cn-beijing.volces.com/api/v3"),
+    CLAUDE("Claude", "provider_claude", TextProviderProtocol.ANTHROPIC_MESSAGES, "https://api.anthropic.com/v1"),
+    ANTHROPIC("Anthropic", "provider_anthropic", TextProviderProtocol.ANTHROPIC_MESSAGES, "https://api.anthropic.com/v1"),
+    GEMINI("Gemini", "provider_gemini", TextProviderProtocol.GEMINI_GENERATE_CONTENT, "https://generativelanguage.googleapis.com/v1beta"),
+    OLLAMA("Ollama", "provider_ollama", TextProviderProtocol.OPENAI_CHAT, "https://your-ollama-host.example/v1", endpointRequiresUserValue = true),
+    AZURE("Azure OpenAI", "provider_azure", TextProviderProtocol.OPENAI_CHAT, "https://{RESOURCE}.openai.azure.com/openai/v1", endpointRequiresUserValue = true),
+    CUSTOM("\u81ea\u5b9a\u4e49\u6a21\u578b", null, TextProviderProtocol.OPENAI_CHAT)
 }
+
+enum class TextProviderProtocol { OPENAI_CHAT, ANTHROPIC_MESSAGES, GEMINI_GENERATE_CONTENT }
 
 enum class ChineseKeyboardLayout(val displayName: String) {
     FULL("26键全键盘拼音"),
@@ -56,6 +92,27 @@ enum class KeyboardModePreference(val displayName: String) {
     CLIPBOARD("剪贴板")
 }
 
+enum class KeyboardStartupMode(val displayName: String) {
+    LAST_USED("默认（上次使用的模式）"),
+    VOICE("听写"),
+    PINYIN("拼音"),
+    ENGLISH("英文"),
+    ASK("问答"),
+    CLIPBOARD("剪贴板")
+}
+
+enum class KeyboardLogoStyle(val displayName: String) {
+    VERTICK("维刻默认"),
+    OPENLESS("OpenLess"),
+    CUSTOM("自定义图片")
+}
+
+data class KeyboardLogoConfig(
+    val style: KeyboardLogoStyle = KeyboardLogoStyle.VERTICK,
+    val darkPath: String = "",
+    val lightPath: String = ""
+)
+
 enum class InputHistoryType(val displayName: String) {
     DICTATION("听写"),
     POLISH("润色"),
@@ -69,7 +126,8 @@ data class AppStyleOverride(val packageName: String, val style: WritingStyle)
 data class ModelEndpointConfig(
     val url: String = "",
     val apiKey: String = "",
-    val model: String = ""
+    val model: String = "",
+    val provider: CloudProvider = CloudProvider.CUSTOM
 ) {
     fun isComplete(): Boolean = url.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
 }

@@ -39,6 +39,9 @@ speller:
 
 translator:
   dictionary: weike_pinyin
+  # This must not share the full-pinyin prism: compiling the nine-key algebra
+  # into weike_pinyin.prism.bin makes letter input unparseable.
+  prism: weike_t9
   enable_sentence: true
   enable_encoder: true
   max_phrase_length: 8

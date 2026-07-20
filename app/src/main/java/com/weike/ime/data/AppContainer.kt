@@ -7,6 +7,7 @@ class AppContainer(context: Context) {
     val lexicon = LexiconDatabase.get(context.applicationContext).lexiconDao()
     val englishLearning = LexiconDatabase.get(context.applicationContext).englishLearningDao()
     val pinyinLearning = LexiconDatabase.get(context.applicationContext).pinyinLearningDao()
+    val predictionLearning = LexiconDatabase.get(context.applicationContext).predictionLearningDao()
     val typingDictionary = LexiconDatabase.get(context.applicationContext).typingDictionaryDao()
     val usageStats = LexiconDatabase.get(context.applicationContext).usageStatsDao()
     val inputHistory = LexiconDatabase.get(context.applicationContext).inputHistoryDao()

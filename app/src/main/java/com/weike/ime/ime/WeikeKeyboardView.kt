@@ -28,6 +28,8 @@ import com.weike.ime.R
 import com.weike.ime.data.ClipboardEntry
 import com.weike.ime.data.HapticStrength
 import com.weike.ime.data.KeyboardTheme
+import com.weike.ime.data.KeyboardLogoConfig
+import com.weike.ime.data.KeyboardLogoStyle
 import com.weike.ime.data.VoiceUiState
 import com.weike.ime.data.WritingStyle
 
@@ -41,6 +43,7 @@ interface KeyboardActions {
     fun finishVoice()
     fun cancelVoice()
     fun closeKeyboard()
+    fun switchInputMethod()
     fun dismissAnswer()
     fun pasteClipboard(entry: ClipboardEntry)
     fun deleteClipboard(entry: ClipboardEntry)
@@ -50,6 +53,7 @@ interface KeyboardActions {
     fun typePinyin(value: String)
     fun chooseCandidate(candidate: PinyinCandidate)
     fun chooseEnglishCandidate(value: String)
+    fun choosePrediction(candidate: PredictionCandidate)
     fun commitEnglishComposition(addSpace: Boolean)
     fun pressTextSpace(pinyin: Boolean)
     fun backspace()
@@ -65,6 +69,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private val targets = mutableListOf<TouchTarget>()
     private val darkLogo = BitmapFactory.decodeResource(resources, R.drawable.vertick_white)
     private val lightLogo = BitmapFactory.decodeResource(resources, R.drawable.vertick_black)
+    private val openLessLogo = BitmapFactory.decodeResource(resources, R.drawable.keyboard_logo_openless)
     private val keySound = KeyboardSoundPlayer(context)
 
     private var mode = KeyboardMode.VOICE
@@ -74,6 +79,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var pinyinCandidates: List<PinyinCandidate> = emptyList()
     private var englishBuffer = ""
     private var englishCandidates: List<PinyinCandidate> = emptyList()
+    private var predictionCandidates: List<PredictionCandidate> = emptyList()
     private var clipboardEntries: List<ClipboardEntry> = emptyList()
     private var pinyinReady = true
     private var pinyinStatus = ""
@@ -115,6 +121,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var keyboardSoundVolume = .45f
     private var keyboardTheme = KeyboardTheme.DARK
     private var showCloseButton = true
+    private var quickImeSwitcherEnabled = false
+    private var keyboardLogoConfig = KeyboardLogoConfig()
+    private var customDarkLogo: android.graphics.Bitmap? = null
+    private var customLightLogo: android.graphics.Bitmap? = null
+    private var modeTabs: RectF? = null
+    private var modeTabDragging = false
+    private var modeTabLastIndex = -1
     private var candidateTextSizeLevel = 0
     private var englishAutoCapitalize = true
     private var englishAutoCapitalizeNext = false
@@ -184,7 +197,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         addUpdateListener { processingTextAlpha = it.animatedValue as Float; invalidate() }
     }
 
-    private val logo: android.graphics.Bitmap get() = if (keyboardTheme == KeyboardTheme.DARK) darkLogo else lightLogo
+    private val logo: android.graphics.Bitmap get() = when (keyboardLogoConfig.style) {
+        KeyboardLogoStyle.OPENLESS -> openLessLogo
+        KeyboardLogoStyle.CUSTOM -> if (keyboardTheme == KeyboardTheme.DARK) customDarkLogo ?: darkLogo else customLightLogo ?: lightLogo
+        KeyboardLogoStyle.VERTICK -> if (keyboardTheme == KeyboardTheme.DARK) darkLogo else lightLogo
+    }
     private val background: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(46, 46, 47) else Color.rgb(247, 247, 249)
     private val key: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(79, 79, 81) else Color.rgb(227, 227, 232)
     private val tabBackground: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(30, 30, 31) else Color.rgb(235, 235, 239)
@@ -211,6 +228,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         pinyinCandidates: List<PinyinCandidate> = this.pinyinCandidates,
         englishBuffer: String = this.englishBuffer,
         englishCandidates: List<PinyinCandidate> = this.englishCandidates,
+        predictionCandidates: List<PredictionCandidate> = this.predictionCandidates,
         liveTranscript: String = "",
         sensitive: Boolean = this.sensitive,
         hapticStrength: HapticStrength = this.hapticStrength,
@@ -224,9 +242,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         symbolsUseEnglish: Boolean = this.symbolsUseEnglish,
         nineKeySymbols: List<String> = this.nineKeySymbols,
         showCloseButton: Boolean = this.showCloseButton,
+        quickImeSwitcherEnabled: Boolean = this.quickImeSwitcherEnabled,
         candidateTextSizeLevel: Int = this.candidateTextSizeLevel,
         englishAutoCapitalize: Boolean = this.englishAutoCapitalize,
-        englishAutoCapitalizeNext: Boolean = this.englishAutoCapitalizeNext
+        englishAutoCapitalizeNext: Boolean = this.englishAutoCapitalizeNext,
+        keyboardLogo: KeyboardLogoConfig = this.keyboardLogoConfig
     ) {
         val normalizedModes = modeOptions.distinct().filter { it != KeyboardMode.SYMBOLS }
             .ifEmpty { listOf(KeyboardMode.PINYIN) }
@@ -251,7 +271,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.mode = targetMode
         this.availableModes = normalizedModes
         this.voiceState = voiceState
-        if (this.pinyinBuffer != pinyinBuffer || this.englishBuffer != englishBuffer) {
+        if (this.pinyinBuffer != pinyinBuffer || this.englishBuffer != englishBuffer ||
+            this.predictionCandidates != predictionCandidates
+        ) {
             candidateScrollX = 0f
             candidateMaxScroll = 0f
         }
@@ -267,6 +289,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.pinyinCandidates = pinyinCandidates
         this.englishBuffer = englishBuffer
         this.englishCandidates = englishCandidates
+        this.predictionCandidates = predictionCandidates
         if (this.clipboardEntries != clipboardEntries) {
             clipboardScrollY = 0f
             clipboardRevealId = clipboardRevealId?.takeIf { id -> clipboardEntries.any { it.id == id } }
@@ -279,6 +302,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.nineKeySymbols = nineKeySymbols
         this.keyboardTheme = keyboardTheme
         this.showCloseButton = showCloseButton
+        this.quickImeSwitcherEnabled = quickImeSwitcherEnabled
+        if (this.keyboardLogoConfig != keyboardLogo) {
+            this.keyboardLogoConfig = keyboardLogo
+            customDarkLogo = decodeLogo(keyboardLogo.darkPath)
+            customLightLogo = decodeLogo(keyboardLogo.lightPath)
+        }
         this.candidateTextSizeLevel = candidateTextSizeLevel.coerceIn(-3, 3)
         this.englishAutoCapitalize = englishAutoCapitalize
         this.englishAutoCapitalizeNext = englishAutoCapitalizeNext
@@ -401,13 +430,22 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         nineKeySymbolViewport = null
         clipboardRows = emptyList()
         if (hasComposition()) {
-            val pinyin = mode == KeyboardMode.PINYIN
-            val candidateItems = if (pinyin) {
-                pinyinCandidates
+            // Candidate mode replaces the header. Never leave the previous
+            // header's mode-selector hit box active over candidate items.
+            modeTabs = null
+            if (mode == KeyboardMode.PINYIN) {
+                candidates(canvas, pinyinCandidates, "正在匹配...", actions::chooseCandidate)
             } else {
-                englishCandidates
+                candidates(canvas, englishCandidates, "正在推荐...", { actions.chooseEnglishCandidate(it.text) })
             }
-            candidates(canvas, candidateItems, pinyin)
+        } else if (hasPredictions()) {
+            modeTabs = null
+            candidates(
+                canvas,
+                predictionCandidates.map { PinyinCandidate(it.text, it.score) },
+                "",
+                { visible -> predictionCandidates.firstOrNull { it.text == visible.text }?.let(actions::choosePrediction) }
+            )
         } else {
             drawHeader(canvas)
             if (mode == KeyboardMode.PINYIN && !pinyinReady) {
@@ -424,6 +462,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun drawHeader(canvas: Canvas) {
+        modeTabs = null
         val showingAnswer = mode == KeyboardMode.ASK && voiceState is VoiceUiState.Preview
         if (showingAnswer) {
             val back = RectF(dp(8), dp(10), dp(46), dp(48))
@@ -463,6 +502,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val tabsRight = if (showCloseButton) width - dp(54) else width - dp(8)
         val tabsLeft = tabsRight - tabWidth
         val tabs = RectF(tabsLeft, dp(10), tabsRight, dp(48))
+        modeTabs = tabs
         rounded(canvas, tabs, dp(20), tabBackground)
         val cell = tabs.width() / availableModes.size
         val selected = availableModes.indexOf(topModeFor(mode, availableModes))
@@ -642,6 +682,14 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             circle(canvas, sideX, atY, dp(24), key)
             lucide(canvas, R.drawable.ic_lucide_at_sign, sideX, atY, dp(21), muted)
             target(RectF(sideX - dp(25), atY - dp(25), sideX + dp(25), atY + dp(25))) { actions.insertAt() }
+            if (quickImeSwitcherEnabled && mode == KeyboardMode.VOICE) {
+                val switchX = dp(43)
+                circle(canvas, switchX, atY, dp(24), key)
+                lucide(canvas, R.drawable.ic_lucide_keyboard, switchX, atY, dp(21), muted)
+                target(RectF(switchX - dp(25), atY - dp(25), switchX + dp(25), atY + dp(25))) {
+                    actions.switchInputMethod()
+                }
+            }
         }
     }
 
@@ -866,7 +914,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private fun candidates(
         canvas: Canvas,
         candidateItems: List<PinyinCandidate>,
-        pinyin: Boolean
+        emptyLabel: String,
+        onPick: (PinyinCandidate) -> Unit
     ) {
         val y = dp(11)
         val textSize = (18 + candidateTextSizeLevel * 2).toFloat()
@@ -876,7 +925,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         paint.textSize = dp(textSize.toInt())
         paint.typeface = Typeface.DEFAULT_BOLD
         if (candidateItems.isEmpty()) {
-            label(canvas, if (pinyin) "正在匹配…" else "正在推荐…", strip.left + dp(8), strip.centerY() + dp(7), 14f, muted, Paint.Align.LEFT)
+            label(canvas, emptyLabel, strip.left + dp(8), strip.centerY() + dp(7), 14f, muted, Paint.Align.LEFT)
             return
         }
         val widths = candidateItems.map { maxOf(dp(32), paint.measureText(it.text) + dp(18)) }
@@ -894,7 +943,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val baseline = box.centerY() - (paint.ascent() + paint.descent()) / 2f
             label(canvas, candidate.text, box.centerX(), baseline, textSize, white, Paint.Align.CENTER, true)
             val visibleBox = RectF(box).apply { intersect(strip) }
-            target(visibleBox, keySound = true) { if (pinyin) actions.chooseCandidate(candidate) else actions.chooseEnglishCandidate(candidate.text) }
+            target(visibleBox, keySound = true) { onPick(candidate) }
         }
         canvas.restore()
     }
@@ -1319,6 +1368,15 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             MotionEvent.ACTION_DOWN -> {
                 touchDownX = event.x
                 touchDownY = event.y
+                // Candidate selection always wins when the header has been
+                // replaced by the candidate strip.
+                candidateDragging = candidateStrip?.contains(event.x, event.y) == true
+                if (!candidateDragging && modeTabs?.contains(event.x, event.y) == true) {
+                    modeTabDragging = true
+                    modeTabLastIndex = -1
+                    selectModeAt(event.x, emitFeedback = false)
+                    return true
+                }
                 clipboardTracking = mode == KeyboardMode.CLIPBOARD && clipboardViewport?.contains(event.x, event.y) == true
                 if (clipboardTracking) {
                     clipboardDragStartScroll = clipboardScrollY
@@ -1330,7 +1388,6 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     invalidate()
                     return true
                 }
-                candidateDragging = candidateStrip?.contains(event.x, event.y) == true
                 if (candidateDragging) {
                     candidateScroller.forceFinished(true)
                     candidateVelocityTracker?.recycle()
@@ -1369,6 +1426,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (modeTabDragging) {
+                    selectModeAt(event.x, emitFeedback = true)
+                    return true
+                }
                 secondaryTouches.toMap().forEach { (pointerId, target) ->
                     val pointerIndex = event.findPointerIndex(pointerId)
                     if (pointerIndex < 0 || !target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
@@ -1479,6 +1540,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                if (modeTabDragging) {
+                    selectModeAt(event.x, emitFeedback = modeTabLastIndex < 0)
+                    modeTabDragging = false
+                    modeTabLastIndex = -1
+                    performClick()
+                    return true
+                }
                 removeCallbacks(repeatBackspace)
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
@@ -1560,6 +1628,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 performClick()
             }
             MotionEvent.ACTION_CANCEL -> {
+                modeTabDragging = false
+                modeTabLastIndex = -1
                 removeCallbacks(repeatBackspace)
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
@@ -1653,12 +1723,35 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun dp(value: Int): Float = value * resources.displayMetrics.density
+
+    private fun selectModeAt(x: Float, emitFeedback: Boolean) {
+        val tabs = modeTabs ?: return
+        val index = ((x - tabs.left) / (tabs.width() / availableModes.size)).toInt()
+            .coerceIn(0, availableModes.lastIndex)
+        if (index == modeTabLastIndex) return
+        modeTabLastIndex = index
+        val target = availableModes[index]
+        if (sensitive && target in listOf(KeyboardMode.VOICE, KeyboardMode.ASK)) return
+        if (emitFeedback) emitHaptic(HapticFeedbackConstants.CONTEXT_CLICK)
+        actions.selectMode(target)
+    }
+
+    private fun decodeLogo(path: String): android.graphics.Bitmap? {
+        if (path.isBlank()) return null
+        return runCatching {
+            BitmapFactory.Options().apply { inSampleSize = 2 }.let { options ->
+                BitmapFactory.decodeFile(path, options)
+            }
+        }.getOrNull()
+    }
     private fun keyLetterSize(size: Float): Float = if (isLandscape()) size * .8f else size
     private fun isLandscape(): Boolean =
         resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private fun hasComposition(): Boolean =
         (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) ||
             (mode == KeyboardMode.ENGLISH && englishBuffer.isNotBlank())
+    private fun hasPredictions(): Boolean = mode in listOf(KeyboardMode.PINYIN, KeyboardMode.ENGLISH, KeyboardMode.SYMBOLS) &&
+        predictionCandidates.isNotEmpty()
     private fun topModeFor(mode: KeyboardMode, options: List<KeyboardMode>): KeyboardMode =
         if (mode in listOf(KeyboardMode.PINYIN, KeyboardMode.ENGLISH) && KeyboardMode.TEXT in options) KeyboardMode.TEXT else mode
     private fun isActive(state: VoiceUiState) = state == VoiceUiState.Listening

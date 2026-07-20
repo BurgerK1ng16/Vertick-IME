@@ -1,9 +1,12 @@
 package com.weike.ime.ime
 
 import android.content.Context
+import android.util.Log
 import com.osfans.trime.core.Rime
 import com.weike.ime.data.ChineseKeyboardLayout
+import com.weike.ime.data.DictionaryPackManager
 import com.weike.ime.data.LexiconTerm
+import com.weike.ime.data.PinyinLearning
 import com.weike.ime.data.TypingDictionaryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -11,12 +14,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.zip.ZipInputStream
 import java.text.Normalizer
+import java.util.zip.ZipInputStream
 
 data class PinyinCandidate(
     val text: String,
     val score: Double = 0.0,
+    /** librime global candidate index; -1 means an application-owned candidate. */
     val index: Int = -1,
     val directCommit: Boolean = false
 )
@@ -25,167 +29,199 @@ data class PinyinSessionState(
     val preedit: String = "",
     val candidates: List<PinyinCandidate> = emptyList(),
     val committedText: String? = null,
-    /** Internal code is retained so a T9 composition can survive an IME view rebuild. */
     val rawComposition: String = preedit
 )
 
-/** A serialized librime session. Candidate ordering is owned by librime. */
-class RimePinyinDecoder(context: Context) {
+/** Serializes every mutation of the active Chinese composition. */
+interface PinyinDecoder {
+    val isReady: Boolean
+    val statusText: String
+    suspend fun startSession(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>, learning: List<PinyinLearning>): Boolean
+    suspend fun clear(): PinyinSessionState
+    suspend fun input(value: String): PinyinSessionState
+    suspend fun backspace(): PinyinSessionState
+    suspend fun restoreComposition(value: String): PinyinSessionState
+    suspend fun selectCandidate(index: Int): PinyinSessionState
+    suspend fun commitFirst(): PinyinSessionState
+    suspend fun currentState(): PinyinSessionState
+    suspend fun selectChineseKeyboardLayout(layout: ChineseKeyboardLayout): Boolean
+    suspend fun syncProfessionalTerms(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>): Boolean
+    suspend fun syncUserLearning(entries: List<PinyinLearning>): Boolean
+    fun pinyinForDisplay(text: String): String
+    suspend fun learnCandidate(text: String): Boolean
+    suspend fun clearUserLearning(): Boolean
+    suspend fun shutdown()
+}
+
+/**
+ * The only runtime Chinese decoder. Tables are generated before release and are
+ * placed in librime's shared prebuilt directory, so startup never deploys YAML
+ * or compiles a dictionary on the device.
+ */
+class RimePinyinDecoder(context: Context) : PinyinDecoder {
     private val appContext = context.applicationContext
     private val sharedDir = File(appContext.filesDir, "rime/shared")
     private val userDir = File(appContext.filesDir, "rime/user")
     private val sessionMutex = Mutex()
+    private var overlayEntries: List<OverlayEntry> = emptyList()
+    private var migratedLearning: Map<String, PinyinLearning> = emptyMap()
 
-    @Volatile var isReady: Boolean = false
+    @Volatile override var isReady = false
+        private set
+    @Volatile override var statusText = "\u6b63\u5728\u52a0\u8f7d\u79bb\u7ebf\u8bcd\u5178"
         private set
 
-    @Volatile var statusText: String = "词典准备中"
-        private set
-
-    suspend fun startSession(
+    override suspend fun startSession(
         terms: List<LexiconTerm>,
-        typingDictionary: List<TypingDictionaryEntry> = emptyList()
+        typingDictionary: List<TypingDictionaryEntry>,
+        learning: List<PinyinLearning>
     ): Boolean = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
+            syncOverlay(terms, typingDictionary, learning)
             if (isReady) return@withLock true
-            statusText = "词典准备中"
-            val needsDeployment = prepareFiles(terms, typingDictionary)
-            val ready = runCatching { startAndVerify(needsDeployment) }.getOrElse { false }
+            statusText = "\u6b63\u5728\u52a0\u8f7d\u79bb\u7ebf\u8bcd\u5178"
+            val startup = runCatching {
+                prepareFiles()
+                startAndVerify()
+            }
+            startup.exceptionOrNull()?.let { error ->
+                Log.e(TAG, "Unable to prepare or start the offline Rime bundle", error)
+            }
+            val ready = startup.getOrDefault(false)
             isReady = ready
-            statusText = if (ready) "Rime-Ice 完整词典已就绪" else "词典准备失败"
+            statusText = if (ready) {
+                "Rime-Ice \u57fa\u7840\u8bcd\u5178\u5df2\u5c31\u7eea"
+            } else {
+                "\u79bb\u7ebf\u8bcd\u5178\u65e0\u6cd5\u52a0\u8f7d"
+            }
             ready
         }
     }
 
-    suspend fun clear(): PinyinSessionState = nativeState {
+    override suspend fun clear(): PinyinSessionState = nativeState {
         if (!isReady) return@nativeState PinyinSessionState()
         Rime.clearRimeComposition()
         snapshot()
     }
 
-    suspend fun input(value: String): PinyinSessionState = nativeState {
+    override suspend fun input(value: String): PinyinSessionState = nativeState {
         if (!isReady || value.length != 1) return@nativeState PinyinSessionState()
         Rime.processRimeKey(value[0].code, 0)
         snapshot()
     }
 
-    suspend fun backspace(): PinyinSessionState = nativeState {
+    override suspend fun backspace(): PinyinSessionState = nativeState {
         if (!isReady) return@nativeState PinyinSessionState()
         Rime.processRimeKey(KEY_BACKSPACE, 0)
         snapshot()
     }
 
-    suspend fun selectCandidate(index: Int): PinyinSessionState = nativeState {
+    override suspend fun restoreComposition(value: String): PinyinSessionState = nativeState {
+        if (!isReady) return@nativeState PinyinSessionState()
+        Rime.clearRimeComposition()
+        value.lowercase().filter { it.isLetterOrDigit() || it == '\'' }.forEach {
+            Rime.processRimeKey(it.code, 0)
+        }
+        snapshot()
+    }
+
+    override suspend fun selectCandidate(index: Int): PinyinSessionState = nativeState {
         if (!isReady || index < 0) return@nativeState PinyinSessionState()
         Rime.selectRimeCandidate(index, true)
         snapshot()
     }
 
-    suspend fun commitFirst(): PinyinSessionState = selectCandidate(0)
+    override suspend fun commitFirst(): PinyinSessionState = selectCandidate(0)
 
-    suspend fun currentState(): PinyinSessionState = nativeState {
-        if (!isReady) PinyinSessionState() else snapshot()
+    override suspend fun currentState(): PinyinSessionState = nativeState {
+        if (isReady) snapshot() else PinyinSessionState()
     }
 
-    suspend fun selectChineseKeyboardLayout(layout: ChineseKeyboardLayout): Boolean = nativeState {
+    override suspend fun selectChineseKeyboardLayout(layout: ChineseKeyboardLayout): Boolean = nativeState {
         if (!isReady) return@nativeState false
         val schema = if (layout == ChineseKeyboardLayout.NINE_KEY) T9_SCHEMA_ID else SCHEMA_ID
-        Rime.selectRimeSchema(schema).also { selected ->
-            if (selected) Rime.clearRimeComposition()
-        }
+        Rime.selectRimeSchema(schema).also { if (it) Rime.clearRimeComposition() }
     }
 
-    /** Uses the same reading lookup as the generated Rime custom dictionary. */
-    fun pinyinCodeForTerm(term: String, hint: String): String =
-        normalizePinyin(hint).ifBlank { readingsForTerm(term.trim()) }
-
-    suspend fun syncProfessionalTerms(
+    override suspend fun syncProfessionalTerms(
         terms: List<LexiconTerm>,
-        typingDictionary: List<TypingDictionaryEntry> = emptyList()
+        typingDictionary: List<TypingDictionaryEntry>
     ): Boolean = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
-            val termsChanged = writeTerms(terms, typingDictionary)
-            if (!isReady) return@withLock false
-            if (termsChanged) restart("正在更新专业词") else true
+            syncOverlay(terms, typingDictionary, migratedLearning.values.toList())
+            true
         }
     }
 
-    /** Writes terms for the next native deployment without restarting a live session. */
-    suspend fun stageProfessionalTerms(
-        terms: List<LexiconTerm>,
-        typingDictionary: List<TypingDictionaryEntry> = emptyList()
-    ): Boolean = withContext(Dispatchers.Default) {
+    override suspend fun syncUserLearning(entries: List<PinyinLearning>): Boolean = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
-            val changed = writeTerms(terms, typingDictionary)
-            if (changed) File(userDir, TERMS_PENDING_FILE).apply {
-                parentFile?.mkdirs()
-                writeText("1")
-            }
-            changed
+            migratedLearning = entries.associateBy { it.term }
+            true
         }
     }
 
-    suspend fun clearUserLearning(): Boolean = withContext(Dispatchers.Default) {
+    /** librime userdb records native candidate selections. */
+    override suspend fun learnCandidate(text: String): Boolean = false
+
+    override suspend fun clearUserLearning(): Boolean = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
             isReady = false
-            statusText = "正在清除学习数据"
-            runCatching {
+            statusText = "\u6b63\u5728\u6e05\u9664\u5b66\u4e60\u6570\u636e"
+            val ready = runCatching {
                 Rime.exitRime()
                 userDir.deleteRecursively()
                 userDir.mkdirs()
-                startAndVerify(deploy = true)
-            }.getOrDefault(false).also { ready ->
-                isReady = ready
-                statusText = if (ready) "Rime-Ice 完整词典已就绪" else "词典准备失败"
-            }
+                // shared/build is immutable and stays available after the clear.
+                startAndVerify()
+            }.getOrDefault(false)
+            isReady = ready
+            statusText = if (ready) "Rime-Ice \u57fa\u7840\u8bcd\u5178\u5df2\u5c31\u7eea" else "\u8bcd\u5178\u52a0\u8f7d\u5931\u8d25"
+            ready
         }
     }
 
-    suspend fun shutdown() = withContext(Dispatchers.Default) {
+    override suspend fun shutdown() = withContext(Dispatchers.Default) {
         sessionMutex.withLock {
             if (isReady) runCatching { Rime.exitRime() }
             isReady = false
-            statusText = "首次使用时准备"
+            statusText = "\u79bb\u7ebf\u8bcd\u5178\u672a\u52a0\u8f7d"
         }
     }
 
-    private suspend fun restart(progress: String): Boolean {
-        isReady = false
-        statusText = progress
-        return runCatching {
-            Rime.exitRime()
-            startAndVerify(deploy = true)
-        }.getOrDefault(false).also { ready ->
-            isReady = ready
-            statusText = if (ready) "Rime-Ice 完整词典已就绪" else "词典更新失败"
-        }
-    }
+    fun pinyinCodeForTerm(term: String, hint: String): String =
+        normalizePinyin(hint).ifBlank { readingsForTerm(term.trim()) }
+
+    override fun pinyinForDisplay(text: String): String = pinyinCodeForTerm(text, "")
 
     private suspend fun <T> nativeState(block: () -> T): T = withContext(Dispatchers.Default) {
         sessionMutex.withLock { block() }
     }
 
-    private suspend fun startAndVerify(deploy: Boolean): Boolean {
-        // Prebuilt table, prism, reverse index, and generated schema are installed as
-        // a consistent bundle. A single schema selection verifies that librime opened
-        // it without invoking maintenance on the full source dictionary.
-        Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, deploy)
+    private suspend fun startAndVerify(): Boolean {
+        Rime.startupRime(sharedDir.absolutePath, userDir.absolutePath, ENGINE_VERSION, false)
         return waitForPrebuiltSchema()
     }
 
     private suspend fun waitForPrebuiltSchema(): Boolean {
-        val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
-        repeat(24) {
-            if (compiledTable.length() >= MIN_TABLE_BYTES && Rime.selectRimeSchema(SCHEMA_ID)) {
-                // One non-mutating startup probe. Unlike the old polling loop this
-                // runs once, after the prebuilt table is already present.
-                Rime.clearRimeComposition()
-                Rime.processRimeKey('n'.code, 0)
-                val healthy = Rime.getRimeCandidates(0, 1).isNotEmpty()
-                Rime.clearRimeComposition()
-                return healthy
+        val compiledTable = File(sharedDir, "build/$SCHEMA_ID.table.bin")
+        repeat(12) { attempt ->
+            val tableReady = compiledTable.length() >= MIN_TABLE_BYTES
+            val selected = tableReady && Rime.selectRimeSchema(SCHEMA_ID)
+            // A selected schema can still point at a missing or incompatible
+            // table. Query the prebuilt bundle before exposing the keyboard.
+            val healthy = selected && Rime.processRimeKey('d'.code, 0) &&
+                Rime.getRimeCandidates(0, 1).isNotEmpty()
+            Rime.clearRimeComposition()
+            if (healthy) {
+                return true
             }
-            delay(250)
+            val status = Rime.getRimeStatus()
+            Log.w(
+                TAG,
+                "Rime startup attempt=${attempt + 1}; tableBytes=${compiledTable.length()}, " +
+                    "selected=$selected, healthy=$healthy, schema=${status.schemaId}, disabled=${status.isDisabled}"
+            )
+            delay(100)
         }
         return false
     }
@@ -196,80 +232,111 @@ class RimePinyinDecoder(context: Context) {
             PinyinCandidate(candidate.text, MAX_CANDIDATES - index.toDouble(), index)
         }
         val rawComposition = context.input.ifBlank { context.composition.preedit.orEmpty() }
-        // Single-letter initials favor characters; full syllables and phrases retain Rime order.
-        val candidates = if (rawComposition.length == 1 && rawComposition[0].isLetter()) {
+        val overlay = overlayEntries.asSequence()
+            .filter { it.matches(compactPinyin(rawComposition)) }
+            .sortedByDescending { it.weight + migratedBoost(it.text) }
+            .map { PinyinCandidate(it.text, it.weight.toDouble(), -1, directCommit = true) }
+            .toList()
+        val nativeOrdered = if (rawComposition.length == 1 && rawComposition[0].isLetter()) {
             nativeCandidates.sortedWith(compareBy<PinyinCandidate> { it.text.length }.thenByDescending { it.score })
         } else {
             nativeCandidates
         }
         return PinyinSessionState(
             preedit = rawComposition,
-            candidates = candidates,
+            candidates = (overlay + nativeOrdered).distinctBy { it.text }.take(MAX_CANDIDATES),
             committedText = Rime.getRimeCommit().text?.takeIf(String::isNotBlank)
         )
     }
 
-    private fun prepareFiles(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>): Boolean {
+    private fun prepareFiles() {
         sharedDir.mkdirs()
         userDir.mkdirs()
+        val activeBundle = DictionaryPackManager(appContext).activeBundleDir()
+        val bundleVersion = activeBundle?.let { "${it.parentFile?.name}:${it.name}:${it.lastModified()}" } ?: "builtin"
         val versionFile = File(sharedDir, ".weike_version")
-        val assetsChanged = versionFile.readTextOrEmpty() != ENGINE_VERSION
-        if (assetsChanged) {
-            ASSET_FILES.forEach { asset -> copyAsset("rime/$asset", File(sharedDir, asset)) }
+        val expectedVersion = "$ENGINE_VERSION:$bundleVersion"
+        val changed = versionFile.readTextOrEmpty() != expectedVersion
+        if (changed) {
+            sharedDir.deleteRecursively()
+            sharedDir.mkdirs()
+            // librime resolves prism/reverse data from user/build before its
+            // shared fallback. Remove any tiny auto-generated prism so it
+            // cannot shadow the release-built index shipped with the table.
             File(userDir, "build").deleteRecursively()
-        }
-        // Custom terms are available immediately through the in-memory candidate
-        // overlay. Do not rebuild the complete base dictionary for a term update.
-        writeTerms(terms, typingDictionary)
-        File(userDir, TERMS_PENDING_FILE).delete()
-        val compiledTable = File(userDir, "build/$SCHEMA_ID.table.bin")
-        if (assetsChanged || !compiledTable.exists() || compiledTable.length() < MIN_TABLE_BYTES) {
-            // Copy these *after* writing the optional term source. Rime's maintenance
-            // compares modification order; copying first made it rebuild the 1.8M-word
-            // base table because weike_terms.dict.yaml looked newer than the table.
-            PREBUILT_FILES.forEach { file ->
-                copyAsset("rime/prebuilt/$file", File(userDir, "build/$file"))
+            if (activeBundle == null) {
+                SHARED_FILES.forEach { copyAsset("rime/prebuilt/$it", File(sharedDir, it)) }
+                // librime resolves deployed configs from shared/build before it
+                // considers the user staging directory. Keeping these copies
+                // alongside the table prevents automatic maintenance.
+                SHARED_FILES.forEach { copyAsset("rime/prebuilt/$it", File(sharedDir, "build/$it")) }
+                PREBUILT_BUILD_FILES.forEach { copyAsset("rime/prebuilt/$it", File(sharedDir, "build/$it")) }
+                copyCompressedAsset("rime/prebuilt/weike_pinyin.table.bin.zip", File(sharedDir, "build/weike_pinyin.table.bin"))
+            } else {
+                DictionaryPackManager.ROOT_FILES.forEach { copyFile(File(activeBundle, it), File(sharedDir, it)) }
+                DictionaryPackManager.ROOT_FILES.forEach { copyFile(File(activeBundle, it), File(sharedDir, "build/$it")) }
+                DictionaryPackManager.BUILD_FILES.forEach {
+                    copyFile(File(activeBundle, "build/$it"), File(sharedDir, "build/$it"))
+                }
+                DictionaryPackManager.AUXILIARY_FILES.forEach {
+                    copyFile(File(activeBundle, it), File(sharedDir, it))
+                }
             }
-            copyCompressedAsset(
-                "rime/prebuilt/weike_pinyin.table.bin.zip",
-                File(userDir, "build/weike_pinyin.table.bin")
-            )
-            versionFile.writeText(ENGINE_VERSION)
+            versionFile.writeText(expectedVersion)
         }
-        return false
+        installUserBuildFiles(activeBundle, force = changed)
+        DictionaryPackManager(appContext).restoreWanxiangSchemaIfEnabled()
+        check(File(sharedDir, "build/$SCHEMA_ID.table.bin").length() >= MIN_TABLE_BYTES) {
+            "Prebuilt Rime table is unavailable"
+        }
     }
 
-    private fun writeTerms(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>): Boolean {
-        sharedDir.mkdirs()
-        val header = "# SPDX-License-Identifier: GPL-3.0-or-later\n---\nname: weike_terms\nversion: '$ENGINE_VERSION'\nsort: by_weight\n...\n"
-        val customByTerm = typingDictionary.associateBy { it.term.trim() }
-        val allTerms = (terms.map { it.term.trim() to it.hint } + typingDictionary.map { it.term.trim() to it.hint })
-            .filter { it.first.isNotBlank() }
-            .associateBy({ it.first }, { it.second })
-        val rows = allTerms.asSequence().mapNotNull { (termText, hint) ->
-            val term = LexiconTerm(termText, hint)
-            val text = term.term.trim().replace(Regex("[\\t\\r\\n]+"), " ")
-            val code = pinyinCodeForTerm(text, term.hint)
-            val weight = if (customByTerm.containsKey(text)) 9_999_999 else 1_000_000
-            if (text.isBlank() || code.isBlank()) null else "$text\t$code\t$weight"
-        }.distinct().joinToString("\n")
-        val destination = File(sharedDir, TERMS_FILE)
-        val content = header + if (rows.isBlank()) "" else "$rows\n"
-        if (destination.readTextOrEmpty() == content) return false
-        destination.writeText(content)
-        return true
+    /**
+     * Rime gives user/build precedence for prism and reverse indexes. Its
+     * maintenance can create a 512-byte empty prism before the first query;
+     * always replace that placeholder with the matching release-built data.
+     */
+    private fun installUserBuildFiles(activeBundle: File?, force: Boolean) {
+        val userBuild = File(userDir, "build")
+        val prism = File(userBuild, "$SCHEMA_ID.prism.bin")
+        if (!force && prism.length() >= MIN_PRISM_BYTES) return
+        userBuild.mkdirs()
+        if (activeBundle == null) {
+            SHARED_FILES.forEach { copyAsset("rime/prebuilt/$it", File(userBuild, it)) }
+            PREBUILT_BUILD_FILES.forEach { copyAsset("rime/prebuilt/$it", File(userBuild, it)) }
+        } else {
+            DictionaryPackManager.ROOT_FILES.forEach { copyFile(File(activeBundle, it), File(userBuild, it)) }
+            DictionaryPackManager.BUILD_FILES.forEach {
+                copyFile(File(activeBundle, "build/$it"), File(userBuild, it))
+            }
+        }
     }
+
+    private fun syncOverlay(
+        terms: List<LexiconTerm>,
+        typingDictionary: List<TypingDictionaryEntry>,
+        learning: List<PinyinLearning>
+    ) {
+        migratedLearning = learning.associateBy { it.term }
+        val preferred = typingDictionary.map { OverlayEntry(it.term, pinyinCodeForTerm(it.term, it.hint), 10_000_000) }
+        val imported = DictionaryPackManager(appContext).importedEntries().map { OverlayEntry(it.text, it.code, 5_000_000) }
+        val professional = terms.map { OverlayEntry(it.term, pinyinCodeForTerm(it.term, it.hint), 1_000_000) }
+        overlayEntries = (preferred + imported + professional).asSequence()
+            .map { it.copy(text = it.text.trim(), code = compactPinyin(it.code)) }
+            .filter { it.text.isNotBlank() && it.code.isNotBlank() }
+            .distinctBy { it.text }
+            .toList()
+    }
+
+    private fun migratedBoost(text: String): Int = migratedLearning[text]
+        ?.let { kotlin.math.ln((it.useCount + 1).toDouble()).times(250_000).toInt() } ?: 0
 
     private fun normalizePinyin(value: String): String = value.lowercase()
-        .replace(Regex("[^a-z' ]"), " ")
-        .trim()
-        .replace(Regex("\\s+"), " ")
+        .replace(Regex("[^a-z' ]"), " ").trim().replace(Regex("\\s+"), " ")
 
-    // This lookup is only for professional terms without an explicit pinyin hint.
-    private fun readingsForTerm(text: String): String {
-        val readings = termReadings()
-        return text.mapNotNull { readings[it] }.joinToString(" ")
-    }
+    private fun compactPinyin(value: String): String = normalizePinyin(value).replace(" ", "").replace("'", "")
+
+    private fun readingsForTerm(text: String): String = text.mapNotNull(termReadings()::get).joinToString(" ")
 
     private fun termReadings(): Map<Char, String> {
         cachedTermReadings?.let { return it }
@@ -291,51 +358,46 @@ class RimePinyinDecoder(context: Context) {
         appContext.assets.open(asset).use { input -> destination.outputStream().use(input::copyTo) }
     }
 
+    private fun copyFile(source: File, destination: File) {
+        require(source.isFile) { "Missing prebuilt dictionary file: ${source.name}" }
+        destination.parentFile?.mkdirs()
+        source.inputStream().use { input -> destination.outputStream().use(input::copyTo) }
+    }
+
     private fun copyCompressedAsset(asset: String, destination: File) {
         destination.parentFile?.mkdirs()
         appContext.assets.open(asset).use { input ->
             ZipInputStream(input).use { zip ->
-                check(zip.nextEntry != null) { "预编译词典资源损坏" }
+                check(zip.nextEntry != null) { "Prebuilt dictionary archive is corrupt" }
                 destination.outputStream().use(zip::copyTo)
             }
         }
     }
 
+    private data class OverlayEntry(val text: String, val code: String, val weight: Int) {
+        fun matches(query: String) = query.isNotBlank() && (code == query || code.startsWith(query))
+    }
+
     companion object {
+        private const val TAG = "RimePinyinDecoder"
         const val SCHEMA_ID = "weike_pinyin"
         const val T9_SCHEMA_ID = "weike_t9"
-        const val DICTIONARY_VERSION = "Rime-Ice Full Chinese 2026.07.07"
-        const val ENGINE_VERSION_TEXT = "librime 1.17.0"
-        // Includes the release-built Rime-Ice table and prism for immediate first use.
-        private const val ENGINE_VERSION = "weike-rime-ice-prebuilt-2026.07.16.1"
-        private const val TERMS_FILE = "weike_terms.dict.yaml"
-        private const val TERMS_PENDING_FILE = ".weike_terms_pending"
+        const val DICTIONARY_VERSION = "Rime-Ice base (8105 + base + others) 2026.07"
+        const val ENGINE_VERSION_TEXT = "librime 1.17.0 + librime-octagram"
+        // Bump whenever any table, prism, reverse database, or deployed config
+        // is regenerated so existing installs atomically replace stale files.
+        private const val ENGINE_VERSION = "weike-rime-ice-base-prebuilt-2026.07.20.6"
         private const val KEY_BACKSPACE = 0xff08
         private const val MAX_CANDIDATES = 96
         private const val MIN_TABLE_BYTES = 1_000_000L
-        private val HEALTH_QUERIES = listOf("d", "dui", "shi", "zhong", "womenjintian")
+        private const val MIN_PRISM_BYTES = 1_000L
         private val CHAR_READING = Regex("^U\\+([0-9A-Fa-f]+):\\s*(.+)$")
-        private val ASSET_FILES = listOf(
-            "default.yaml",
-            "weike_pinyin.schema.yaml",
-            "weike_t9.schema.yaml",
-            "weike_pinyin.dict.yaml",
-            "weike_terms.dict.yaml",
-            "rime_ice.dict.yaml",
-            "cn_dicts/8105.dict.yaml",
-            "cn_dicts/base.dict.yaml",
-            "cn_dicts/ext.dict.yaml",
-            "cn_dicts/tencent.dict.yaml",
-            "cn_dicts/others.dict.yaml"
-        )
-        private val PREBUILT_FILES = listOf(
-            "default.yaml",
+        private val SHARED_FILES = listOf("default.yaml", "weike_pinyin.schema.yaml", "weike_t9.schema.yaml")
+        private val PREBUILT_BUILD_FILES = listOf(
             "weike_pinyin.prism.bin",
-            "weike_pinyin.reverse.bin",
-            "weike_pinyin.schema.yaml",
-            "weike_t9.schema.yaml"
+            "weike_t9.prism.bin",
+            "weike_pinyin.reverse.bin"
         )
-
         @Volatile private var cachedTermReadings: Map<Char, String>? = null
 
         fun requestClearLearnedData(context: Context) {
@@ -349,8 +411,8 @@ class RimePinyinDecoder(context: Context) {
             File(context.applicationContext.filesDir, "rime/.clear_learning").delete()
 
         fun deploymentStatus(context: Context): String = if (
-            File(context.applicationContext.filesDir, "rime/user/build/weike_pinyin.table.bin").exists()
-        ) "已就绪" else "首次使用时准备"
+            File(context.applicationContext.filesDir, "rime/shared/build/weike_pinyin.table.bin").exists()
+        ) "\u5df2\u5c31\u7eea" else "\u672a\u52a0\u8f7d"
     }
 }
 

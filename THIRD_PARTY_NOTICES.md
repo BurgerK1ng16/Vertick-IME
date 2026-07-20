@@ -14,15 +14,20 @@
 - Upstream: https://github.com/iDvel/rime-ice
 - License: GPL-3.0-or-later
 - Used for: Chinese dictionaries and schema data under `app/src/main/assets/rime`.
+- Dictionary source revisions and the prebuilt package contract are recorded in
+  `dictionaries/SOURCE_LOCK.md`. The built-in package contains only
+  `8105 + base + others`; optional packages are independently downloaded.
 
-## rime-essay-simp
+## RIME-LMDG / Wanxiang grammar data
 
-- Upstream: https://github.com/rime/rime-essay-simp
-- Revision: `c3de118026871c566e1f6097a068cdf0f3e53c6f`
-- License: LGPL-3.0-or-later; the source lock and license are in
-  `third_party/rime-essay-simp`.
-- Used for: build-time high-frequency Simplified Chinese phrase weights in the
-  generated offline Pinyin index. The source data is not retained on device.
+- Upstream: https://github.com/amzxyz/RIME-LMDG
+- License: CC-BY-4.0. Optional grammar packages must retain attribution and the
+  exact upstream release digest in their manifest. They are not bundled by default.
+- Used for: the optional `wanxiang-lts-zh-hans` long-sentence language model.
+
+Sogou hotword data is never redistributed by this project. The local dictionary
+importer accepts files selected by the user and stores them only in app-private
+storage.
 
 ## cppjieba and jieba dictionaries
 

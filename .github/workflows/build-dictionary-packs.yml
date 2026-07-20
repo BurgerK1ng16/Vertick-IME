@@ -1,0 +1,45 @@
+name: Build dictionary packs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'app/src/main/assets/rime/prebuilt/**'
+      - 'scripts/build-dictionary-pack.ps1'
+      - 'scripts/DictionaryManifestSigner.java'
+      - 'dictionaries/SOURCE_LOCK.md'
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build base Rime bundle
+        shell: pwsh
+        run: ./scripts/build-dictionary-pack.ps1 -Version $env:GITHUB_SHA.Substring(0,12)
+      - name: Sign dictionary manifest
+        if: env.DICTIONARY_MANIFEST_KEYSTORE_BASE64 != ''
+        shell: pwsh
+        env:
+          DICTIONARY_MANIFEST_KEYSTORE_BASE64: ${{ secrets.DICTIONARY_MANIFEST_KEYSTORE_BASE64 }}
+          DICTIONARY_MANIFEST_STORE_PASSWORD: ${{ secrets.DICTIONARY_MANIFEST_STORE_PASSWORD }}
+          DICTIONARY_MANIFEST_KEY_ALIAS: ${{ secrets.DICTIONARY_MANIFEST_KEY_ALIAS }}
+          DICTIONARY_MANIFEST_KEY_PASSWORD: ${{ secrets.DICTIONARY_MANIFEST_KEY_PASSWORD }}
+        run: |
+          $keystore = Join-Path $env:RUNNER_TEMP 'dictionary-manifest.p12'
+          [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:DICTIONARY_MANIFEST_KEYSTORE_BASE64))
+          javac scripts/DictionaryManifestSigner.java
+          java -cp scripts DictionaryManifestSigner $keystore $env:DICTIONARY_MANIFEST_STORE_PASSWORD $env:DICTIONARY_MANIFEST_KEY_ALIAS $env:DICTIONARY_MANIFEST_KEY_PASSWORD dictionaries/dist/manifest.json dictionaries/dist/manifest.signed.json
+          Move-Item dictionaries/dist/manifest.signed.json dictionaries/dist/manifest.json -Force
+      - name: Upload pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rime-dictionary-packs
+          path: dictionaries/dist/*
+      - name: Publish pack release asset
+        if: startsWith(github.ref, 'refs/tags/dictionaries-')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dictionaries/dist/*

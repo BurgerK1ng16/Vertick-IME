@@ -1,14 +1,12 @@
 # Third-party notices
 
-## Rime / librime
+## Trime JNI and librime
 
-- Upstream: https://github.com/rime/librime
-- License: GPL-3.0-or-later
-- Used for: offline Pinyin decoding and user dictionary learning.
-- Release requirement: a public release must include the exact corresponding
-  librime source, patches, build scripts, and version lock used for its Android
-  native library. `app/src/main/jniLibs/arm64-v8a/librime_jni.so` is retained
-  only for local development until that source tree is vendored.
+- Upstream: https://github.com/osfans/trime and https://github.com/rime/librime
+- License: Trime is GPL-3.0-or-later; librime is BSD-3-Clause.
+- Used for: Trime's Android JNI bridge, offline Pinyin decoding and user dictionary learning.
+- Corresponding source, build scripts, and the version lock are provided in
+  `third_party/librime`.
 
 ## Rime-Ice
 
@@ -16,13 +14,17 @@
 - License: GPL-3.0-or-later
 - Used for: Chinese dictionaries and schema data under `app/src/main/assets/rime`.
 
-## rime-essay-simp
+## RIME-LMDG / Wanxiang grammar data
 
-- Upstream: https://github.com/rime/rime-essay-simp
-- Revision: c3de118026871c566e1f6097a068cdf0f3e53c6f
-- License: LGPL-3.0-or-later. The license text is bundled as LGPL-3.0.txt.
-- Used for: build-time high-frequency Simplified Chinese phrase weights in the
-  generated offline Pinyin index.
+- Upstream: https://github.com/amzxyz/RIME-LMDG
+- License: CC-BY-4.0. Optional grammar packages retain attribution and their
+  exact upstream release digest in the package manifest. They are not bundled
+  by default.
+- Used for: the optional `wanxiang-lts-zh-hans` long-sentence language model.
+
+Sogou hotword data is never redistributed by this project. The local dictionary
+importer accepts files selected by the user and stores them only in app-private
+storage.
 
 ## cppjieba and jieba dictionaries
 
