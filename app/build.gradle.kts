@@ -19,8 +19,8 @@ android {
         applicationId = "com.weike.ime"
         minSdk = 35
         targetSdk = 36
-        versionCode = 20
-        versionName = "1.4.0"
+        versionCode = 21
+        versionName = "1.4.1"
         ndk { abiFilters += "arm64-v8a" }
     }
 

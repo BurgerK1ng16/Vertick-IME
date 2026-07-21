@@ -33,6 +33,10 @@ class AppSettingsRepository(private val context: Context) {
     private val candidateTextSizeLevelKey = intPreferencesKey("candidate_text_size_level")
     private val englishAutoCapitalizeKey = booleanPreferencesKey("english_auto_capitalize")
     private val doubleSpacePeriodKey = booleanPreferencesKey("double_space_period")
+    private val keyboardHeightLevelKey = intPreferencesKey("keyboard_height_level")
+    private val keyboardBottomOffsetLevelKey = intPreferencesKey("keyboard_bottom_offset_level")
+    private val punctuationShortcutsKey = booleanPreferencesKey("punctuation_shortcuts")
+    private val cursorSliderEnabledKey = booleanPreferencesKey("cursor_slider_enabled")
     private val historyRetentionKey = stringPreferencesKey("history_retention")
     private val keyboardModesKey = stringPreferencesKey("keyboard_modes")
     private val chineseKeyboardLayoutKey = stringPreferencesKey("chinese_keyboard_layout")
@@ -51,6 +55,7 @@ class AppSettingsRepository(private val context: Context) {
     private val asrProviderKey = stringPreferencesKey("asr_provider")
     private val textProviderKey = stringPreferencesKey("text_provider")
     private val clipboardHistoryEnabledKey = booleanPreferencesKey("clipboard_history_enabled")
+    private val recentClipboardPasteKey = booleanPreferencesKey("recent_clipboard_paste")
     private val quickImeSwitcherKey = booleanPreferencesKey("quick_ime_switcher")
     private val predictionEnabledKey = booleanPreferencesKey("prediction_enabled")
     private val predictionLearningEnabledKey = booleanPreferencesKey("prediction_learning_enabled")
@@ -86,6 +91,18 @@ class AppSettingsRepository(private val context: Context) {
     }
     val doubleSpacePeriod = context.settingsDataStore.data.map { prefs ->
         prefs[doubleSpacePeriodKey] ?: false
+    }
+    val keyboardHeightLevel = context.settingsDataStore.data.map { prefs ->
+        (prefs[keyboardHeightLevelKey] ?: 0).coerceIn(-2, 2)
+    }
+    val keyboardBottomOffsetLevel = context.settingsDataStore.data.map { prefs ->
+        (prefs[keyboardBottomOffsetLevelKey] ?: 0).coerceIn(0, 4)
+    }
+    val punctuationShortcuts = context.settingsDataStore.data.map { prefs ->
+        prefs[punctuationShortcutsKey] ?: false
+    }
+    val cursorSliderEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[cursorSliderEnabledKey] ?: true
     }
     val historyRetention = context.settingsDataStore.data.map { prefs ->
         runCatching { HistoryRetention.valueOf(prefs[historyRetentionKey].orEmpty()) }
@@ -136,6 +153,9 @@ class AppSettingsRepository(private val context: Context) {
     }
     val clipboardHistoryEnabled = context.settingsDataStore.data.map { prefs ->
         prefs[clipboardHistoryEnabledKey] ?: false
+    }
+    val recentClipboardPasteEnabled = context.settingsDataStore.data.map { prefs ->
+        prefs[recentClipboardPasteKey] ?: true
     }
     val quickImeSwitcherEnabled = context.settingsDataStore.data.map { prefs ->
         prefs[quickImeSwitcherKey] ?: false
@@ -214,6 +234,34 @@ class AppSettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { prefs -> prefs[doubleSpacePeriodKey] = enabled }
     }
 
+    suspend fun keyboardHeightLevel(): Int = keyboardHeightLevel.first()
+
+    suspend fun saveKeyboardHeightLevel(level: Int) {
+        val normalized = level.coerceIn(-2, 2)
+        startupPreferences.edit().putInt(STARTUP_HEIGHT_LEVEL, normalized).apply()
+        context.settingsDataStore.edit { prefs -> prefs[keyboardHeightLevelKey] = normalized }
+    }
+
+    suspend fun keyboardBottomOffsetLevel(): Int = keyboardBottomOffsetLevel.first()
+
+    suspend fun saveKeyboardBottomOffsetLevel(level: Int) {
+        val normalized = level.coerceIn(0, 4)
+        startupPreferences.edit().putInt(STARTUP_BOTTOM_OFFSET_LEVEL, normalized).apply()
+        context.settingsDataStore.edit { prefs -> prefs[keyboardBottomOffsetLevelKey] = normalized }
+    }
+
+    suspend fun punctuationShortcuts(): Boolean = punctuationShortcuts.first()
+
+    suspend fun savePunctuationShortcuts(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[punctuationShortcutsKey] = enabled }
+    }
+
+    suspend fun cursorSliderEnabled(): Boolean = cursorSliderEnabled.first()
+
+    suspend fun saveCursorSliderEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[cursorSliderEnabledKey] = enabled }
+    }
+
     suspend fun predictionEnabled(): Boolean = predictionEnabled.first()
 
     suspend fun savePredictionEnabled(enabled: Boolean) {
@@ -272,9 +320,12 @@ class AppSettingsRepository(private val context: Context) {
             .coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
         val englishAutoCapitalize = startupPreferences.getBoolean(STARTUP_ENGLISH_AUTO_CAPITALIZE, true)
         val doubleSpacePeriod = startupPreferences.getBoolean(STARTUP_DOUBLE_SPACE_PERIOD, false)
+        val keyboardHeightLevel = startupPreferences.getInt(STARTUP_HEIGHT_LEVEL, 0).coerceIn(-2, 2)
+        val keyboardBottomOffsetLevel = startupPreferences.getInt(STARTUP_BOTTOM_OFFSET_LEVEL, 0).coerceIn(0, 4)
         return KeyboardStartupState(
             theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
-            englishAutoCapitalize, doubleSpacePeriod, startupPreferences.contains(STARTUP_THEME)
+            englishAutoCapitalize, doubleSpacePeriod, keyboardHeightLevel, keyboardBottomOffsetLevel,
+            startupPreferences.contains(STARTUP_THEME)
         )
     }
 
@@ -294,13 +345,15 @@ class AppSettingsRepository(private val context: Context) {
             .coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)
         val englishAutoCapitalize = prefs[englishAutoCapitalizeKey] ?: true
         val doubleSpacePeriod = prefs[doubleSpacePeriodKey] ?: false
+        val keyboardHeightLevel = (prefs[keyboardHeightLevelKey] ?: 0).coerceIn(-2, 2)
+        val keyboardBottomOffsetLevel = (prefs[keyboardBottomOffsetLevelKey] ?: 0).coerceIn(0, 4)
         cacheKeyboardStartupState(
             theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
-            englishAutoCapitalize, doubleSpacePeriod
+            englishAutoCapitalize, doubleSpacePeriod, keyboardHeightLevel, keyboardBottomOffsetLevel
         )
         KeyboardStartupState(
             theme, layout, modes, haptic, volume, closeButtonEnabled, candidateTextSizeLevel,
-            englishAutoCapitalize, doubleSpacePeriod, true
+            englishAutoCapitalize, doubleSpacePeriod, keyboardHeightLevel, keyboardBottomOffsetLevel, true
         )
     }
 
@@ -313,7 +366,9 @@ class AppSettingsRepository(private val context: Context) {
         closeButtonEnabled: Boolean? = null,
         candidateTextSizeLevel: Int? = null,
         englishAutoCapitalize: Boolean? = null,
-        doubleSpacePeriod: Boolean? = null
+        doubleSpacePeriod: Boolean? = null,
+        keyboardHeightLevel: Int? = null,
+        keyboardBottomOffsetLevel: Int? = null
     ) {
         startupPreferences.edit().apply {
             theme?.let { putString(STARTUP_THEME, it.name) }
@@ -325,6 +380,8 @@ class AppSettingsRepository(private val context: Context) {
             candidateTextSizeLevel?.let { putInt(STARTUP_CANDIDATE_TEXT_SIZE_LEVEL, it.coerceIn(MIN_CANDIDATE_TEXT_SIZE_LEVEL, MAX_CANDIDATE_TEXT_SIZE_LEVEL)) }
             englishAutoCapitalize?.let { putBoolean(STARTUP_ENGLISH_AUTO_CAPITALIZE, it) }
             doubleSpacePeriod?.let { putBoolean(STARTUP_DOUBLE_SPACE_PERIOD, it) }
+            keyboardHeightLevel?.let { putInt(STARTUP_HEIGHT_LEVEL, it.coerceIn(-2, 2)) }
+            keyboardBottomOffsetLevel?.let { putInt(STARTUP_BOTTOM_OFFSET_LEVEL, it.coerceIn(0, 4)) }
         }.apply()
     }
 
@@ -356,6 +413,12 @@ class AppSettingsRepository(private val context: Context) {
 
     suspend fun saveClipboardHistoryEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { prefs -> prefs[clipboardHistoryEnabledKey] = enabled }
+    }
+
+    suspend fun recentClipboardPasteEnabled(): Boolean = recentClipboardPasteEnabled.first()
+
+    suspend fun saveRecentClipboardPasteEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { prefs -> prefs[recentClipboardPasteKey] = enabled }
     }
 
     suspend fun quickImeSwitcherEnabled(): Boolean = quickImeSwitcherEnabled.first()
@@ -486,6 +549,8 @@ class AppSettingsRepository(private val context: Context) {
         private const val STARTUP_CANDIDATE_TEXT_SIZE_LEVEL = "candidate_text_size_level"
         private const val STARTUP_ENGLISH_AUTO_CAPITALIZE = "english_auto_capitalize"
         private const val STARTUP_DOUBLE_SPACE_PERIOD = "double_space_period"
+        private const val STARTUP_HEIGHT_LEVEL = "height_level"
+        private const val STARTUP_BOTTOM_OFFSET_LEVEL = "bottom_offset_level"
         private const val SECURE_ASR_KEY = "asr_api_key"
         private const val SECURE_TEXT_KEY = "text_api_key"
         const val DEFAULT_KEYBOARD_SOUND_VOLUME = .45f
@@ -522,5 +587,7 @@ data class KeyboardStartupState(
     val candidateTextSizeLevel: Int,
     val englishAutoCapitalize: Boolean,
     val doubleSpacePeriod: Boolean,
+    val keyboardHeightLevel: Int,
+    val keyboardBottomOffsetLevel: Int,
     val isSeeded: Boolean
 )

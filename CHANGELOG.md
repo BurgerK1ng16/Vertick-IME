@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.1 - 2026-07-21
+
+### English
+
+- Fixed a candidate-selection race in some editors. Tapping a Pinyin candidate now replaces and commits the active composing text in one batch, preventing the selected text from disappearing or being duplicated after Enter.
+- Added keyboard-height and bottom-offset controls, plus an optional full-width cursor slider that works consistently across text, voice, answer, and clipboard surfaces.
+- Added an optional recent-clipboard quick-paste capsule. It is memory-only, appears briefly after a recent copy, shows the copied content with a one-way smooth scroll, and never overlaps the mode selector.
+- Added configurable comma/period shortcut keys for Pinyin and English layouts, refined their alignment, and improved dark-theme pressed-key feedback.
+- Refined voice controls when the cursor slider is enabled: send, delete, @, and the optional input-method picker now use a stable two-column layout.
+
+### 简体中文
+
+- 修复部分应用中点选拼音候选词后内容暂时消失、回车后重复上屏的问题。现在候选词会在同一批处理中替换并提交组合态。
+- 新增键盘高度、底部间距调节，以及可选的全宽底部光标滑块；文字、听写、问答和剪贴板界面保持一致避让。
+- 新增可选的最近复制快速粘贴胶囊。内容仅保存在内存中，短暂展示复制文本并单向平滑滚动，不会遮挡右上角模式选择。
+- 新增拼音和英文键盘的逗号、句号快捷键，并优化标点对齐与暗色模式按键按下反馈。
+- 开启光标滑块时，听写/润色控制区改为稳定的双列布局，发送、删除、@ 与可选输入法切换按钮不再互相遮挡。
+
 ## 1.4.0 - 2026-07-21
 
 ### English

@@ -3,6 +3,7 @@ package com.weike.ime.ime
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Build
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -46,6 +47,7 @@ interface KeyboardActions {
     fun switchInputMethod()
     fun dismissAnswer()
     fun pasteClipboard(entry: ClipboardEntry)
+    fun pasteRecentClipboard()
     fun deleteClipboard(entry: ClipboardEntry)
     fun undoLastInsert()
     fun typeEnglish(value: String)
@@ -57,6 +59,8 @@ interface KeyboardActions {
     fun commitEnglishComposition(addSpace: Boolean)
     fun pressTextSpace(pinyin: Boolean)
     fun backspace()
+    fun moveCursorBy(delta: Int)
+    fun canBackspace(): Boolean
     fun enter()
     fun newline()
     fun insertAt()
@@ -81,6 +85,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var englishCandidates: List<PinyinCandidate> = emptyList()
     private var predictionCandidates: List<PredictionCandidate> = emptyList()
     private var clipboardEntries: List<ClipboardEntry> = emptyList()
+    private var recentClipboardText = ""
     private var pinyinReady = true
     private var pinyinStatus = ""
     private var pinyinNineKey = false
@@ -131,11 +136,20 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var candidateTextSizeLevel = 0
     private var englishAutoCapitalize = true
     private var englishAutoCapitalizeNext = false
+    private var keyboardHeightLevel = 0
+    private var keyboardBottomOffsetLevel = 0
+    private var punctuationShortcuts = false
+    private var cursorSliderEnabled = true
     private var automaticUppercase = false
     private var meter = 0f
     private var voiceMorph = 0f
     private var modeIndicator = 0f
     private var pressedBox: RectF? = null
+    private var cursorSlider: RectF? = null
+    private var cursorSliderDragging = false
+    private var cursorSliderLastX = 0f
+    private var cursorSliderThumbX = Float.NaN
+    private var swipeUpTriggered = false
     private var activeTarget: TouchTarget? = null
     private var activeTargetCancelled = false
     private var primaryPointerId = MotionEvent.INVALID_POINTER_ID
@@ -165,6 +179,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
     private val repeatBackspace = object : Runnable {
         override fun run() {
+            if (!actions.canBackspace()) {
+                repeatAction = null
+                repeatHaptic = null
+                pressedBox = null
+                invalidate()
+                return
+            }
             repeatAction?.invoke() ?: return
             repeatHaptic?.let(::emitHaptic)
             repeatIntervalMs = (repeatIntervalMs * .86f).toLong().coerceAtLeast(34L)
@@ -178,6 +199,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private var leavingProcessing = false
     private var completionProgress = 1f
     private var shakeOffset = 0f
+    private var quickPasteProgress = 0f
+    private var quickPasteRenderText = ""
+    private var quickPasteMotionStartedAt = 0L
+    private val quickPasteMotionDurationMs = 5_000L
     private val transition = ValueAnimator().apply {
         duration = 200L
         interpolator = AccelerateDecelerateInterpolator()
@@ -196,6 +221,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         interpolator = AccelerateDecelerateInterpolator()
         addUpdateListener { processingTextAlpha = it.animatedValue as Float; invalidate() }
     }
+    private val quickPasteTransition = ValueAnimator().apply {
+        duration = 180L
+        interpolator = AccelerateDecelerateInterpolator()
+        addUpdateListener { quickPasteProgress = it.animatedValue as Float; invalidate() }
+    }
 
     private val logo: android.graphics.Bitmap get() = when (keyboardLogoConfig.style) {
         KeyboardLogoStyle.OPENLESS -> openLessLogo
@@ -204,6 +234,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
     private val background: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(46, 46, 47) else Color.rgb(247, 247, 249)
     private val key: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(79, 79, 81) else Color.rgb(227, 227, 232)
+    private val pressedKey: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(63, 63, 65) else Color.rgb(188, 188, 194)
     private val tabBackground: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(30, 30, 31) else Color.rgb(235, 235, 239)
     private val white: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(246, 245, 243) else Color.rgb(28, 28, 30)
     private val muted: Int get() = if (keyboardTheme == KeyboardTheme.DARK) Color.rgb(190, 190, 192) else Color.rgb(105, 105, 112)
@@ -246,7 +277,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         candidateTextSizeLevel: Int = this.candidateTextSizeLevel,
         englishAutoCapitalize: Boolean = this.englishAutoCapitalize,
         englishAutoCapitalizeNext: Boolean = this.englishAutoCapitalizeNext,
-        keyboardLogo: KeyboardLogoConfig = this.keyboardLogoConfig
+        keyboardLogo: KeyboardLogoConfig = this.keyboardLogoConfig,
+        recentClipboardText: String = this.recentClipboardText,
+        keyboardHeightLevel: Int = this.keyboardHeightLevel,
+        keyboardBottomOffsetLevel: Int = this.keyboardBottomOffsetLevel,
+        punctuationShortcuts: Boolean = this.punctuationShortcuts,
+        cursorSliderEnabled: Boolean = this.cursorSliderEnabled
     ) {
         val normalizedModes = modeOptions.distinct().filter { it != KeyboardMode.SYMBOLS }
             .ifEmpty { listOf(KeyboardMode.PINYIN) }
@@ -311,6 +347,26 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         this.candidateTextSizeLevel = candidateTextSizeLevel.coerceIn(-3, 3)
         this.englishAutoCapitalize = englishAutoCapitalize
         this.englishAutoCapitalizeNext = englishAutoCapitalizeNext
+        val geometryChanged = this.keyboardHeightLevel != keyboardHeightLevel ||
+            this.keyboardBottomOffsetLevel != keyboardBottomOffsetLevel
+        this.keyboardHeightLevel = keyboardHeightLevel.coerceIn(-2, 2)
+        this.keyboardBottomOffsetLevel = keyboardBottomOffsetLevel.coerceIn(0, 4)
+        this.punctuationShortcuts = punctuationShortcuts
+        this.cursorSliderEnabled = cursorSliderEnabled
+        if (this.recentClipboardText != recentClipboardText) {
+            val showing = recentClipboardText.isNotBlank()
+            if (showing) {
+                quickPasteRenderText = recentClipboardText
+                quickPasteMotionStartedAt = SystemClock.elapsedRealtime()
+            }
+            quickPasteTransition.cancel()
+            quickPasteTransition.setFloatValues(quickPasteProgress, if (showing) 1f else 0f)
+            quickPasteTransition.start()
+            if (!showing) postDelayed({
+                if (this.recentClipboardText.isBlank() && quickPasteProgress <= .01f) quickPasteRenderText = ""
+            }, 190L)
+        }
+        this.recentClipboardText = recentClipboardText
         if (targetMode == KeyboardMode.ENGLISH && englishBuffer.isBlank() && englishAutoCapitalize && englishAutoCapitalizeNext) {
             if (!uppercase) {
                 uppercase = true
@@ -360,6 +416,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             modeTransition.setFloatValues(modeIndicator, targetIndicator)
             modeTransition.start()
         }
+        if (geometryChanged) requestLayout()
         if (previousState != voiceState) {
             val feedback = when {
                 voiceState == VoiceUiState.Listening -> HapticFeedbackConstants.GESTURE_START
@@ -403,7 +460,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val desired = if (isLandscape()) dp(238).toInt() else dp(330).toInt()
+        val base = if (isLandscape()) dp(238) else dp(330)
+        val desired = (base + dp(keyboardHeightLevel * 18) + dp(keyboardBottomOffsetLevel * 8)).toInt()
         setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), resolveSize(desired, heightMeasureSpec))
     }
 
@@ -424,6 +482,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         }
         canvas.drawPath(surface, paint)
         targets.clear()
+        cursorSlider = null
         candidateStrip = null
         answerViewport = null
         clipboardViewport = null
@@ -459,6 +518,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             KeyboardMode.TEXT -> drawKeyboard(canvas, true)
             else -> drawKeyboard(canvas, mode == KeyboardMode.PINYIN)
         }
+        if (cursorSliderEnabled) drawCursorSlider(canvas)
     }
 
     private fun drawHeader(canvas: Canvas) {
@@ -468,6 +528,31 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val back = RectF(dp(8), dp(10), dp(46), dp(48))
             lucide(canvas, R.drawable.ic_lucide_chevron_left, back.centerX(), back.centerY(), dp(24), white)
             target(back, hapticFeedback = HapticFeedbackConstants.CONTEXT_CLICK) { actions.dismissAnswer() }
+        } else if (quickPasteRenderText.isNotBlank() && quickPasteProgress > .01f) {
+            val tabsRight = if (showCloseButton) width - dp(54) else width - dp(8)
+            val tabCellWidth = if (isLandscape()) dp(44) else dp(52)
+            val tabsLeft = tabsRight - tabCellWidth * availableModes.size
+            // Keep the quick paste affordance clear of the mode selector at every mode count.
+            val expandedWidth = minOf(dp(220), (tabsLeft - dp(18)).coerceAtLeast(dp(92)))
+            val quickPaste = RectF(dp(10), dp(10), dp(10) + expandedWidth * quickPasteProgress, dp(48))
+            rounded(canvas, quickPaste, dp(19), tabBackground)
+            val iconSurface = RectF(quickPaste.left + dp(4), quickPaste.top + dp(4), quickPaste.left + dp(34), quickPaste.bottom - dp(4))
+            rounded(canvas, iconSurface, dp(15), key)
+            lucide(canvas, R.drawable.ic_lucide_clipboard_list, iconSurface.centerX(), iconSurface.centerY(), dp(18), white)
+            val textBox = RectF(quickPaste.left + dp(40), quickPaste.top, quickPaste.right - dp(8), quickPaste.bottom)
+            val content = quickPasteRenderText.replace(Regex("\\s+"), " ").trim()
+            paint.textSize = dp(13).toFloat()
+            val textWidth = paint.measureText(content)
+            val elapsed = (SystemClock.elapsedRealtime() - quickPasteMotionStartedAt).coerceAtLeast(0L)
+            val progress = (elapsed.coerceAtMost(quickPasteMotionDurationMs).toFloat() / quickPasteMotionDurationMs)
+            val easedProgress = .5f - .5f * kotlin.math.cos((Math.PI * progress).toFloat())
+            val textX = textBox.right - (textBox.width() + textWidth) * easedProgress
+            canvas.save()
+            canvas.clipRect(textBox)
+            label(canvas, content, textX, quickPaste.centerY() + dp(5), 13f, white, Paint.Align.LEFT, true)
+            canvas.restore()
+            if (elapsed < quickPasteMotionDurationMs) postInvalidateOnAnimation()
+            target(quickPaste, hapticFeedback = HapticFeedbackConstants.CONTEXT_CLICK) { actions.pasteRecentClipboard() }
         } else {
             val logoHeight = dp(26)
             val logoWidth = logoHeight * logo.width / logo.height
@@ -542,7 +627,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private fun drawClipboard(canvas: Canvas) {
         val left = dp(10)
         val top = dp(65)
-        val bottom = height.toFloat() - dp(16)
+        val bottom = contentBottom() - keyboardBottomReserve() - dp(16)
         val viewport = RectF(left, top, width - dp(10), bottom)
         clipboardViewport = RectF(0f, top - dp(6), width.toFloat(), bottom + dp(6))
         if (clipboardEntries.isEmpty()) {
@@ -668,26 +753,57 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             }
         }
         if (!listening && mode != KeyboardMode.ASK) {
-            val bottom = height.toFloat() - if (isLandscape()) dp(14) else dp(32)
-            val newline = RectF(cx - dp(60), bottom - dp(48), cx + dp(60), bottom)
-            rounded(canvas, newline, dp(24), key)
-            label(canvas, "\u53d1\u9001", newline.centerX(), newline.centerY() + dp(5), 14f, muted, Paint.Align.CENTER)
-            target(newline, longPressAction = { actions.newline() }) { actions.enter() }
-            val sideX = width - dp(43)
-            val atY = bottom - dp(24)
-            val deleteY = atY - dp(55)
-            circle(canvas, sideX, deleteY, dp(24), key)
-            lucide(canvas, R.drawable.ic_lucide_delete, sideX, deleteY, dp(22), muted)
-            target(RectF(sideX - dp(25), deleteY - dp(25), sideX + dp(25), deleteY + dp(25)), repeat = true) { actions.backspace() }
-            circle(canvas, sideX, atY, dp(24), key)
-            lucide(canvas, R.drawable.ic_lucide_at_sign, sideX, atY, dp(21), muted)
-            target(RectF(sideX - dp(25), atY - dp(25), sideX + dp(25), atY + dp(25))) { actions.insertAt() }
-            if (quickImeSwitcherEnabled && mode == KeyboardMode.VOICE) {
-                val switchX = dp(43)
-                circle(canvas, switchX, atY, dp(24), key)
-                lucide(canvas, R.drawable.ic_lucide_keyboard, switchX, atY, dp(21), muted)
-                target(RectF(switchX - dp(25), atY - dp(25), switchX + dp(25), atY + dp(25))) {
-                    actions.switchInputMethod()
+            val bottom = contentBottom() - keyboardBottomReserve() -
+                if (isLandscape()) dp(14) else dp(8)
+            val rightX = width - dp(43)
+            val leftX = dp(43)
+            val lowerY = bottom - dp(24)
+            val upperY = lowerY - dp(55)
+
+            // Delete remains in the upper-right. The lower actions adapt to the slider layout.
+            circle(canvas, rightX, upperY, dp(24), key)
+            lucide(canvas, R.drawable.ic_lucide_delete, rightX, upperY, dp(22), muted)
+            target(
+                RectF(rightX - dp(25), upperY - dp(25), rightX + dp(25), upperY + dp(25)),
+                repeat = true
+            ) { actions.backspace() }
+
+            if (cursorSliderEnabled) {
+                circle(canvas, rightX, lowerY, dp(24), key)
+                lucide(canvas, R.drawable.ic_lucide_move_right, rightX, lowerY, dp(21), muted)
+                target(
+                    RectF(rightX - dp(25), lowerY - dp(25), rightX + dp(25), lowerY + dp(25)),
+                    longPressAction = { actions.newline() }
+                ) { actions.enter() }
+
+                circle(canvas, leftX, lowerY, dp(24), key)
+                lucide(canvas, R.drawable.ic_lucide_at_sign, leftX, lowerY, dp(21), muted)
+                target(RectF(leftX - dp(25), lowerY - dp(25), leftX + dp(25), lowerY + dp(25))) {
+                    actions.insertAt()
+                }
+                if (quickImeSwitcherEnabled && mode == KeyboardMode.VOICE) {
+                    circle(canvas, leftX, upperY, dp(24), key)
+                    lucide(canvas, R.drawable.ic_lucide_keyboard, leftX, upperY, dp(21), muted)
+                    target(RectF(leftX - dp(25), upperY - dp(25), leftX + dp(25), upperY + dp(25))) {
+                        actions.switchInputMethod()
+                    }
+                }
+            } else {
+                val newline = RectF(cx - dp(60), bottom - dp(48), cx + dp(60), bottom)
+                rounded(canvas, newline, dp(24), key)
+                label(canvas, "\u53d1\u9001", newline.centerX(), newline.centerY() + dp(5), 14f, muted, Paint.Align.CENTER)
+                target(newline, longPressAction = { actions.newline() }) { actions.enter() }
+                circle(canvas, rightX, lowerY, dp(24), key)
+                lucide(canvas, R.drawable.ic_lucide_at_sign, rightX, lowerY, dp(21), muted)
+                target(RectF(rightX - dp(25), lowerY - dp(25), rightX + dp(25), lowerY + dp(25))) {
+                    actions.insertAt()
+                }
+                if (quickImeSwitcherEnabled && mode == KeyboardMode.VOICE) {
+                    circle(canvas, leftX, lowerY, dp(24), key)
+                    lucide(canvas, R.drawable.ic_lucide_keyboard, leftX, lowerY, dp(21), muted)
+                    target(RectF(leftX - dp(25), lowerY - dp(25), leftX + dp(25), lowerY + dp(25))) {
+                        actions.switchInputMethod()
+                    }
                 }
             }
         }
@@ -754,7 +870,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val left = dp(20)
         val right = width - dp(20)
         val viewportTop = dp(76)
-        val viewportBottom = height - dp(18)
+        val viewportBottom = contentBottom() - keyboardBottomReserve() - dp(18)
         val viewport = RectF(left, viewportTop, right, viewportBottom)
         answerViewport = RectF(0f, viewportTop - dp(6), width.toFloat(), viewportBottom + dp(6))
 
@@ -823,7 +939,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         }
         val top = dp(62)
         val gap = dp(8)
-        val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
+        val keyHeight = (contentBottom() - top - dp(9) - keyboardBottomReserve() - gap * 3) / 4f
         val edge = dp(5)
         val letterWidth = (width - edge * 2 - dp(7) * 9) / 10f
         letters(canvas, "qwertyuiop", top, keyHeight, pinyin, edge, letterWidth)
@@ -837,7 +953,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val top = dp(62)
         val gap = dp(7)
         val edge = dp(5)
-        val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
+        val keyHeight = (contentBottom() - top - dp(9) - keyboardBottomReserve() - gap * 3) / 4f
         val sidebarWidth = (width * .17f).coerceAtLeast(dp(54))
         val sidebar = RectF(edge, top, edge + sidebarWidth, top + keyHeight * 3 + gap * 2)
         val mainLeft = sidebar.right + gap
@@ -978,8 +1094,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val edge = (width - rowWidth) / 2f
         val shift = RectF(edge, y, edge + side, y + h)
         key(canvas, shift)
-        val shiftIcon = if (!pinyin && uppercase) R.drawable.ic_lucide_arrow_big_up_dash else R.drawable.ic_lucide_arrow_big_up
-        lucide(canvas, shiftIcon, shift.centerX(), shift.centerY(), dp(20), white)
+        if (pinyin) {
+            label(canvas, "'词", shift.centerX(), shift.centerY() + dp(6), 14f, white, Paint.Align.CENTER, true)
+        } else {
+            val shiftIcon = if (uppercase) R.drawable.ic_lucide_arrow_big_up_dash else R.drawable.ic_lucide_arrow_big_up
+            lucide(canvas, shiftIcon, shift.centerX(), shift.centerY(), dp(20), white)
+        }
         target(shift, keySound = true) {
             if (pinyin) actions.typePinyin("'") else {
                 uppercase = !uppercase
@@ -1016,8 +1136,20 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val controlWidth = keyWidth * 2 + gap
         val number = RectF(edge, y, edge + controlWidth, y + h)
         val enter = RectF(width - edge - controlWidth, y, width - edge, y + h)
-        val space = RectF(number.right + gap, y, enter.left - gap, y + h)
+        val quickWidth = if (punctuationShortcuts) dp(43) else 0f
+        val punctuationLeft = number.right + gap + if (pinyin) dp(2) else 0f
+        val punctuation = RectF(punctuationLeft, y, punctuationLeft + quickWidth, y + h)
+        val space = RectF(if (punctuationShortcuts) punctuation.right + gap else number.right + gap, y, enter.left - gap, y + h)
         key(canvas, number)
+        if (punctuationShortcuts) {
+            key(canvas, punctuation)
+            label(canvas, if (pinyin) "。" else ".", punctuation.centerX() + if (pinyin) dp(2) else 0f, punctuation.centerY() - dp(6), 15f, muted, Paint.Align.CENTER)
+            // A comma descends below its baseline; keep its baseline above the lower edge.
+            label(canvas, if (pinyin) "，" else ",", punctuation.centerX() + if (pinyin) dp(3) else 0f, punctuation.centerY() + dp(10), 19f, white, Paint.Align.CENTER)
+            target(punctuation, keySound = true, longPressAction = { actions.typeEnglish(if (pinyin) "。" else ".") }, swipeUpAction = { actions.typeEnglish(if (pinyin) "。" else ".") }) {
+                actions.typeEnglish(if (pinyin) "，" else ",")
+            }
+        }
         key(canvas, space)
         rounded(canvas, enter, dp(10), white)
         centeredLabel(canvas, "123", number, 19f, white, Paint.Align.CENTER)
@@ -1028,10 +1160,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         target(enter, keySound = true, longPressAction = { actions.newline() }) { actions.enter() }
     }
 
+    private fun drawCursorSlider(canvas: Canvas) {
+        val bottom = contentBottom()
+        val track = RectF(dp(14), bottom - dp(25), width - dp(14), bottom - dp(7))
+        cursorSlider = RectF(track).apply { inset(0f, -dp(10)) }
+        rounded(canvas, track, track.height() / 2f, tabBackground)
+        val thumbX = cursorSliderThumbX.takeIf { it.isFinite() }?.coerceIn(track.left, track.right) ?: track.centerX()
+        rounded(canvas, RectF(thumbX - dp(20), track.top - dp(4), thumbX + dp(20), track.bottom + dp(4)), dp(12), key)
+    }
+
     private fun drawSymbols(canvas: Canvas) {
         val top = dp(62)
         val gap = dp(8)
-        val keyHeight = (height - top - dp(9) - dp(32) - gap * 3) / 4f
+        val keyHeight = (contentBottom() - top - dp(9) - keyboardBottomReserve() - gap * 3) / 4f
         val edge = dp(5)
         val symbolWidth = (width - edge * 2 - dp(7) * 9) / 10f
         val chineseSymbols = !symbolsUseEnglish
@@ -1083,7 +1224,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         }
     }
 
-    private fun key(canvas: Canvas, box: RectF) = rounded(canvas, box, dp(9), key)
+    private fun key(canvas: Canvas, box: RectF) = rounded(canvas, box, dp(9), if (isPressed(box)) pressedKey else key)
 
     private fun fittedLabel(
         canvas: Canvas,
@@ -1357,10 +1498,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         keySound: Boolean = false,
         hapticFeedback: Int? = HapticFeedbackConstants.KEYBOARD_TAP,
         longPressAction: (() -> Unit)? = null,
+        swipeUpAction: (() -> Unit)? = null,
         releaseAction: (() -> Unit)? = null,
         action: () -> Unit
     ) {
-        targets += TouchTarget(box, enabled, repeat, hold, keySound, hapticFeedback, longPressAction, releaseAction, action)
+        targets += TouchTarget(box, enabled, repeat, hold, keySound, hapticFeedback, longPressAction, swipeUpAction, releaseAction, action)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1371,6 +1513,15 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 // Candidate selection always wins when the header has been
                 // replaced by the candidate strip.
                 candidateDragging = candidateStrip?.contains(event.x, event.y) == true
+                cursorSliderDragging = !candidateDragging && cursorSlider?.contains(event.x, event.y) == true
+                if (cursorSliderDragging) {
+                    cursorSliderLastX = event.x
+                    cursorSliderThumbX = event.x
+                    pressedBox = null
+                    activeTarget = null
+                    invalidate()
+                    return true
+                }
                 if (!candidateDragging && modeTabs?.contains(event.x, event.y) == true) {
                     modeTabDragging = true
                     modeTabLastIndex = -1
@@ -1406,6 +1557,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 if (hit != null) secondaryTouches[primaryPointerId] = hit
                 activeTargetCancelled = false
                 longPressTriggered = false
+                swipeUpTriggered = false
                 pressedBox = hit?.box
                 if (hit?.repeat == true) {
                     repeatAction = hit.action
@@ -1428,6 +1580,19 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             MotionEvent.ACTION_MOVE -> {
                 if (modeTabDragging) {
                     selectModeAt(event.x, emitFeedback = true)
+                    return true
+                }
+                if (cursorSliderDragging) {
+                    val step = dp(12)
+                    val delta = event.x - cursorSliderLastX
+                    val moves = (kotlin.math.abs(delta) / step).toInt()
+                    if (moves > 0) {
+                        actions.moveCursorBy(if (delta > 0f) moves else -moves)
+                        cursorSliderLastX += if (delta > 0f) moves * step else -moves * step
+                        emitHaptic(HapticFeedbackConstants.KEYBOARD_TAP)
+                    }
+                    cursorSliderThumbX = event.x
+                    invalidate()
                     return true
                 }
                 secondaryTouches.toMap().forEach { (pointerId, target) ->
@@ -1499,6 +1664,17 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     invalidate()
                 } else {
                     val active = activeTarget
+                    if (!swipeUpTriggered && active?.swipeUpAction != null && event.y <= touchDownY - dp(22) &&
+                        kotlin.math.abs(event.x - touchDownX) <= dp(36)) {
+                        removeCallbacks(longPressRunnable)
+                        active.swipeUpAction.invoke()
+                        swipeUpTriggered = true
+                        activeTargetCancelled = true
+                        pressedBox = null
+                        emitHaptic(HapticFeedbackConstants.CONTEXT_CLICK)
+                        invalidate()
+                        return true
+                    }
                     if (active != null && !active.box.contains(event.x, event.y)) {
                         activeTargetCancelled = true
                         pressedBox = null
@@ -1514,7 +1690,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val pointerId = event.getPointerId(pointerIndex)
                 val target = secondaryTouches.remove(pointerId)
                 val cancelled = cancelledSecondaryTouches.remove(pointerId)
-                if (target != null && !cancelled && target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
+                if (target != null && !cancelled && target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex)) &&
+                    (!target.repeat || actions.canBackspace())) {
                     target.hapticFeedback?.let(::emitHaptic)
                     if (target.keySound) keySound.play(keyboardSoundVolume)
                     if (pointerId == primaryPointerId && longPressTriggered) {
@@ -1551,6 +1728,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
                 repeatHaptic = null
+                if (cursorSliderDragging) {
+                    cursorSliderDragging = false
+                    cursorSliderThumbX = Float.NaN
+                    invalidate()
+                    performClick()
+                    return true
+                }
                 if (clipboardTracking) {
                     val entry = clipboardTouchedEntry
                     val dx = event.x - touchDownX
@@ -1612,7 +1796,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 postDelayed({ pressedBox = null; invalidate() }, 100L)
                 if (longPressTriggered) {
                     active?.releaseAction?.invoke()
-                } else if (releasedOnOriginalTarget) {
+                } else if (releasedOnOriginalTarget && (!active!!.repeat || actions.canBackspace())) {
                     active?.hapticFeedback?.let(::emitHaptic)
                     if (active?.keySound == true) keySound.play(keyboardSoundVolume)
                     active?.action?.invoke()
@@ -1625,6 +1809,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 secondaryTouches.clear()
                 cancelledSecondaryTouches.clear()
                 longPressTriggered = false
+                swipeUpTriggered = false
                 performClick()
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -1634,6 +1819,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 removeCallbacks(longPressRunnable)
                 repeatAction = null
                 repeatHaptic = null
+                cursorSliderDragging = false
+                cursorSliderThumbX = Float.NaN
                 activeTarget?.takeIf { longPressTriggered }?.releaseAction?.invoke()
                 activeTarget = null
                 activeTargetCancelled = false
@@ -1643,6 +1830,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 secondaryTouches.clear()
                 cancelledSecondaryTouches.clear()
                 longPressTriggered = false
+                swipeUpTriggered = false
                 candidateDragging = false
                 candidateVelocityTracker?.recycle()
                 candidateVelocityTracker = null
@@ -1747,6 +1935,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private fun keyLetterSize(size: Float): Float = if (isLandscape()) size * .8f else size
     private fun isLandscape(): Boolean =
         resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    private fun contentBottom(): Float = height.toFloat() - dp(keyboardBottomOffsetLevel * 8)
+    private fun keyboardBottomReserve(): Float = if (cursorSliderEnabled) dp(32) else dp(8)
     private fun hasComposition(): Boolean =
         (mode == KeyboardMode.PINYIN && pinyinBuffer.isNotBlank()) ||
             (mode == KeyboardMode.ENGLISH && englishBuffer.isNotBlank())
@@ -1770,6 +1960,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         val keySound: Boolean,
         val hapticFeedback: Int?,
         val longPressAction: (() -> Unit)?,
+        val swipeUpAction: (() -> Unit)?,
         val releaseAction: (() -> Unit)?,
         val action: () -> Unit
     )

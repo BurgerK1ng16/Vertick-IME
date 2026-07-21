@@ -834,6 +834,34 @@ class MainActivity : AppCompatActivity() {
         addView(illustratedOptionCard("显示收起键", operationGuide("开启后，键盘右上角会显示收起按钮"), closeButton) {
             lifecycleScope.launch { closeButton.setChecked(container.settings.keyboardCloseButtonEnabled()) }
         }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        addView(illustratedOptionCard("键盘高度", operationGuide("调整主键盘整体高度", "不会改变横屏悬浮键盘的固定比例")) {
+            val levels = listOf("更低", "偏低", "默认", "偏高", "更高")
+            val control = SegmentedControl(this@MainActivity, levels, 2) { index ->
+                lifecycleScope.launch { container.settings.saveKeyboardHeightLevel(index - 2) }
+            }
+            addView(control)
+            lifecycleScope.launch { control.setSelected(container.settings.keyboardHeightLevel() + 2) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        addView(illustratedOptionCard("键盘底部", operationGuide("向上抬高键盘，给底部手势区域留出空间")) {
+            val offsets = listOf("0", "8dp", "16dp", "24dp", "32dp")
+            val control = SegmentedControl(this@MainActivity, offsets, 0) { index ->
+                lifecycleScope.launch { container.settings.saveKeyboardBottomOffsetLevel(index) }
+            }
+            addView(control)
+            lifecycleScope.launch { control.setSelected(container.settings.keyboardBottomOffsetLevel()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        val punctuationShortcuts = BlueToggle(this@MainActivity, false) { enabled ->
+            lifecycleScope.launch { container.settings.savePunctuationShortcuts(enabled) }
+        }
+        addView(illustratedOptionCard("逗号与句号快捷键", operationGuide("在拼音和英文空格键左侧显示逗号和句号", "逗号键长按或上滑可输入句号"), punctuationShortcuts) {
+            lifecycleScope.launch { punctuationShortcuts.setChecked(container.settings.punctuationShortcuts()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
+        val cursorSlider = BlueToggle(this@MainActivity, true) { enabled ->
+            lifecycleScope.launch { container.settings.saveCursorSliderEnabled(enabled) }
+        }
+        addView(illustratedOptionCard("光标滑块", operationGuide("键盘底部显示全宽滑块", "左右拖动可逐字移动光标"), cursorSlider) {
+            lifecycleScope.launch { cursorSlider.setChecked(container.settings.cursorSliderEnabled()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
         addView(illustratedOptionCard("Logo 定制", operationGuide("选择键盘左上角的品牌 Logo", "自定义模式可分别选择暗色和亮色键盘图片")) {
             val options = KeyboardLogoStyle.entries.toList()
             lateinit var customImageChoices: LinearLayout
@@ -941,6 +969,16 @@ class MainActivity : AppCompatActivity() {
         ) {
             lifecycleScope.launch { clipboard.setChecked(container.settings.clipboardHistoryEnabled()) }
         })
+        val recentPaste = BlueToggle(this@MainActivity, true) { enabled ->
+            lifecycleScope.launch { container.settings.saveRecentClipboardPasteEnabled(enabled) }
+        }
+        addView(illustratedOptionCard(
+            "最近复制快速粘贴",
+            operationGuide("复制非敏感内容后的 15 秒内，键盘左上角会显示粘贴按钮", "点击后立即粘贴，不写入剪贴板历史"),
+            recentPaste
+        ) {
+            lifecycleScope.launch { recentPaste.setChecked(container.settings.recentClipboardPasteEnabled()) }
+        }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 12))
     }
 
     private fun buildLocalData(): View = screen {

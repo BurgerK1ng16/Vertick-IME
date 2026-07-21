@@ -134,6 +134,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var clipboardEntries: List<ClipboardEntry> = emptyList()
     private var lastClipboardContent = ""
     private var clipboardHistoryEnabled = false
+    private var recentClipboardPasteEnabled = true
+    private var recentClipboardContent = ""
+    private var recentClipboardCapturedAtMs = 0L
+    private var recentClipboardVisibleUntilMs = 0L
+    private var inputViewActive = false
+    private var keyboardHeightLevel = 0
+    private var keyboardBottomOffsetLevel = 0
+    private var punctuationShortcuts = false
+    private var cursorSliderEnabled = true
     private var sensitiveField = false
     private var rawTranscript = ""
     private var finishVoiceJob: Job? = null
@@ -182,6 +191,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         candidateTextSizeLevel = startup.candidateTextSizeLevel
         englishAutoCapitalize = startup.englishAutoCapitalize
         doubleSpacePeriod = startup.doubleSpacePeriod
+        keyboardHeightLevel = startup.keyboardHeightLevel
+        keyboardBottomOffsetLevel = startup.keyboardBottomOffsetLevel
         if (!isConfiguredMode(mode) && mode != KeyboardMode.SYMBOLS) {
             mode = initialModeFor(visibleKeyboardModes.firstOrNull() ?: KeyboardMode.TEXT)
         }
@@ -274,6 +285,35 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             container.settings.doubleSpacePeriod.collect { enabled ->
                 doubleSpacePeriod = enabled
                 container.settings.cacheKeyboardStartupState(doubleSpacePeriod = enabled)
+            }
+        }
+        serviceScope.launch {
+            container.settings.keyboardHeightLevel.collect { level ->
+                keyboardHeightLevel = level
+                container.settings.cacheKeyboardStartupState(keyboardHeightLevel = level)
+                if (::keyboard.isInitialized) keyboard.requestLayout()
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.keyboardBottomOffsetLevel.collect { level ->
+                keyboardBottomOffsetLevel = level
+                container.settings.cacheKeyboardStartupState(keyboardBottomOffsetLevel = level)
+                if (::keyboard.isInitialized) keyboard.requestLayout()
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.punctuationShortcuts.collect { enabled ->
+                punctuationShortcuts = enabled
+                render()
+            }
+        }
+        serviceScope.launch {
+            container.settings.cursorSliderEnabled.collect { enabled ->
+                cursorSliderEnabled = enabled
+                if (::keyboard.isInitialized) keyboard.requestLayout()
+                render()
             }
         }
         serviceScope.launch {
@@ -392,6 +432,14 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 } else {
                     capturePrimaryClipboard()
                 }
+            }
+        }
+        serviceScope.launch {
+            container.settings.recentClipboardPasteEnabled.collect { enabled ->
+                recentClipboardPasteEnabled = enabled
+                if (!enabled) clearRecentClipboard()
+                else capturePrimaryClipboard()
+                render()
             }
         }
     }
@@ -677,6 +725,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         Log.d(TAG, "onStartInputView; restarting=$restarting; mode=$mode; pinyin=${pinyinRawBuffer.length}; english=${englishBuffer.length}")
         super.onStartInputView(info, restarting)
+        inputViewActive = true
+        presentRecentClipboardForInputView()
         // Some Xiaomi builds recreate only the input view. Reassert the composing
         // value against the newly supplied InputConnection in that case.
         if (pinyinBuffer.isNotBlank()) updateComposingText(pinyinBuffer)
@@ -708,6 +758,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         // different field cannot restore it because InputViewRecovery.matches()
         // checks the package, input type, and field id.
         captureInputViewRecovery()
+        inputViewActive = false
         stopVoice(cancelled = true)
         super.onFinishInputView(finishingInput)
     }
@@ -730,6 +781,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         Log.d(TAG, "onWindowHidden; mode=$mode; landscape=$landscape; overlay=${overlayHost != null}")
         if (!landscape) dismissLandscapeOverlay()
+        inputViewActive = false
         super.onWindowHidden()
     }
 
@@ -923,6 +975,15 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun pasteClipboard(entry: ClipboardEntry) {
         finishCompositionThen { currentInputConnection?.commitText(entry.content, 1) }
+    }
+
+    override fun pasteRecentClipboard() {
+        val content = recentClipboardContent.takeIf {
+            it.isNotBlank() && SystemClock.elapsedRealtime() - recentClipboardCapturedAtMs <= RECENT_CLIPBOARD_WINDOW_MS
+        } ?: return
+        finishCompositionThen { currentInputConnection?.commitText(content, 1) }
+        clearRecentClipboard()
+        render()
     }
 
     override fun deleteClipboard(entry: ClipboardEntry) {
@@ -1407,12 +1468,16 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun chooseCandidate(candidate: PinyinCandidate) {
+        val targetConnection = currentInputConnection
         enqueuePinyin {
             if (candidate.directCommit) {
-                commitDirectPinyin(candidate.text)
+                commitDirectPinyin(candidate.text, targetConnection)
             } else {
                 val state = pinyinDecoder.selectCandidate(candidate.index)
-                commitNativePinyin(state.committedText)
+                // Some librime schemas do not expose a commit string until the
+                // following key event. The tapped candidate is the authoritative
+                // fallback and must still replace the editor's composing text.
+                commitNativePinyin(state.committedText ?: candidate.text, targetConnection)
             }
         }
     }
@@ -1482,6 +1547,31 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         }
     }
 
+    override fun canBackspace(): Boolean {
+        if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotEmpty() || pendingPinyinMutations > 0)) return true
+        if (mode == KeyboardMode.ENGLISH && englishBuffer.isNotEmpty()) return true
+        return currentInputConnection?.getTextBeforeCursor(1, 0)?.isNotEmpty() == true
+    }
+
+    override fun moveCursorBy(delta: Int) {
+        if (delta == 0) return
+        finishCompositionThen {
+            val connection = currentInputConnection ?: return@finishCompositionThen
+            val keyCode = if (delta > 0) android.view.KeyEvent.KEYCODE_DPAD_RIGHT else android.view.KeyEvent.KEYCODE_DPAD_LEFT
+            val requested = kotlin.math.abs(delta).coerceAtMost(12)
+            val available = if (delta > 0) {
+                connection.getTextAfterCursor(requested, 0)?.length ?: 0
+            } else {
+                connection.getTextBeforeCursor(requested, 0)?.length ?: 0
+            }
+            repeat(minOf(requested, available)) {
+                connection.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, keyCode))
+                connection.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, keyCode))
+            }
+        }
+        clearPredictions()
+    }
+
     override fun enter() {
         if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
             enqueuePinyin { commitRawPinyin() }
@@ -1539,10 +1629,18 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
                 clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
                 modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols, keyboardCloseButtonEnabled,
-                quickImeSwitcherEnabled, candidateTextSizeLevel, englishAutoCapitalize, shouldAutoCapitalizeEnglish(), keyboardLogo
+                quickImeSwitcherEnabled, candidateTextSizeLevel, englishAutoCapitalize, shouldAutoCapitalizeEnglish(), keyboardLogo,
+                currentRecentClipboard(), keyboardHeightLevel, keyboardBottomOffsetLevel, punctuationShortcuts,
+                cursorSliderEnabled
             )
         }
     }
+
+    private fun currentRecentClipboard(): String = recentClipboardContent.takeIf {
+        recentClipboardPasteEnabled && !sensitiveField &&
+            SystemClock.elapsedRealtime() - recentClipboardCapturedAtMs <= RECENT_CLIPBOARD_WINDOW_MS
+            && SystemClock.elapsedRealtime() <= recentClipboardVisibleUntilMs
+    }.orEmpty()
 
     private fun shouldAutoCapitalizeEnglish(): Boolean {
         if (!englishAutoCapitalize || mode != KeyboardMode.ENGLISH || englishBuffer.isNotBlank()) return false
@@ -1604,7 +1702,6 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun capturePrimaryClipboard() {
-        if (!clipboardHistoryEnabled) return
         val content = runCatching {
             clipboardManager.primaryClip
                 ?.takeIf { it.itemCount > 0 }
@@ -1614,11 +1711,48 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                 ?.trim()
                 .orEmpty()
         }.getOrDefault("")
-        if (content.isBlank() || content == lastClipboardContent || isSensitiveClipboard(content)) return
-        lastClipboardContent = content
-        serviceScope.launch(Dispatchers.IO) {
-            container.clipboard.record(content)
+        if (content.isBlank() || isSensitiveClipboard(content)) return
+        if (recentClipboardPasteEnabled) {
+            recentClipboardContent = content
+            recentClipboardCapturedAtMs = SystemClock.elapsedRealtime()
+            if (inputViewActive) presentRecentClipboardForInputView()
+            mainHandler.postDelayed({
+                if (SystemClock.elapsedRealtime() - recentClipboardCapturedAtMs >= RECENT_CLIPBOARD_WINDOW_MS) {
+                    clearRecentClipboard()
+                    render()
+                }
+            }, RECENT_CLIPBOARD_WINDOW_MS)
+            render()
         }
+        if (clipboardHistoryEnabled && content != lastClipboardContent) {
+            lastClipboardContent = content
+            serviceScope.launch(Dispatchers.IO) {
+                container.clipboard.record(content)
+            }
+        }
+    }
+
+    private fun clearRecentClipboard() {
+        recentClipboardContent = ""
+        recentClipboardCapturedAtMs = 0L
+        recentClipboardVisibleUntilMs = 0L
+    }
+
+    private fun presentRecentClipboardForInputView() {
+        if (!recentClipboardPasteEnabled || recentClipboardContent.isBlank() ||
+            SystemClock.elapsedRealtime() - recentClipboardCapturedAtMs > RECENT_CLIPBOARD_WINDOW_MS) {
+            clearRecentClipboard()
+            return
+        }
+        val expiresAt = SystemClock.elapsedRealtime() + QUICK_PASTE_VISIBLE_WINDOW_MS
+        recentClipboardVisibleUntilMs = expiresAt
+        mainHandler.postDelayed({
+            if (recentClipboardVisibleUntilMs == expiresAt && SystemClock.elapsedRealtime() >= expiresAt) {
+                clearRecentClipboard()
+                render()
+            }
+        }, QUICK_PASTE_VISIBLE_WINDOW_MS)
+        render()
     }
 
     private fun isSensitiveClipboard(content: String): Boolean {
@@ -1681,7 +1815,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private suspend fun commitCurrentPinyin() {
         val candidate = pinyinCandidates.firstOrNull() ?: return
         if (candidate.directCommit) commitDirectPinyin(candidate.text)
-        else commitNativePinyin(pinyinDecoder.selectCandidate(candidate.index).committedText)
+        else {
+            val state = pinyinDecoder.selectCandidate(candidate.index)
+            commitNativePinyin(state.committedText ?: candidate.text)
+        }
     }
 
     private suspend fun commitRawPinyin() {
@@ -1699,7 +1836,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         render()
     }
 
-    private suspend fun commitDirectPinyin(text: String) {
+    private suspend fun commitDirectPinyin(text: String, targetConnection: InputConnection? = currentInputConnection) {
         if (!sensitiveField && pinyinDecoder.learnCandidate(text)) {
             serviceScope.launch(Dispatchers.IO) {
                 container.pinyinLearning.record(text)
@@ -1710,18 +1847,38 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         pinyinBuffer = ""
         pinyinRawBuffer = ""
         pinyinCandidates = emptyList()
-        updateComposingText("")
-        commitTextAndPredict(text)
+        commitPinyinCandidateAndPredict(text, targetConnection)
         render()
     }
 
-    private suspend fun commitNativePinyin(text: String?) {
+    private suspend fun commitNativePinyin(text: String?, targetConnection: InputConnection? = currentInputConnection) {
         pinyinBuffer = ""
         pinyinRawBuffer = ""
         pinyinCandidates = emptyList()
-        updateComposingText("")
-        text?.takeIf { it.isNotBlank() }?.let(::commitTextAndPredict)
+        text?.takeIf { it.isNotBlank() }?.let { commitPinyinCandidateAndPredict(it, targetConnection) }
         render()
+    }
+
+    /**
+     * Candidate selection must not clear composing text before the selected text
+     * reaches the editor. Several editors confirm that transient empty composing
+     * state on their next Enter event, which caused a missing or duplicate pick.
+     */
+    private fun commitPinyinCandidateAndPredict(text: String, targetConnection: InputConnection?) {
+        if (text.isBlank()) return
+        val connection = targetConnection ?: return
+        if (connection !== currentInputConnection) return
+        val batchStarted = connection.beginBatchEdit()
+        try {
+            if (connection.setComposingText(text, 1)) {
+                connection.finishComposingText()
+            } else {
+                connection.commitText(text, 1)
+            }
+        } finally {
+            if (batchStarted) connection.endBatchEdit()
+        }
+        schedulePredictions(text, connection)
     }
 
     private fun commitTextAndPredict(text: String, appendSpace: Boolean = false) {
@@ -1983,6 +2140,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private const val PREDICTION_CONTEXT_LIMIT = 16
         private const val INPUT_VIEW_RECOVERY_WINDOW_MS = 5_000L
         private const val DOUBLE_SPACE_PERIOD_WINDOW_MS = 350L
+        private const val RECENT_CLIPBOARD_WINDOW_MS = 15_000L
+        private const val QUICK_PASTE_VISIBLE_WINDOW_MS = 5_000L
         private val AUTO_CAPITALIZE_AFTER = setOf('.', '!', '?', '。', '！', '？', '\n')
         private const val LANDSCAPE_OVERLAY_HEIGHT_DP = 258
         private const val IME_STATE_PREFERENCES = "ime_view_state"
