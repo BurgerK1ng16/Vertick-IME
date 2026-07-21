@@ -1852,6 +1852,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitNativePinyin(text: String?, targetConnection: InputConnection? = currentInputConnection) {
+        // Selecting a Rime candidate may commit only a segment and leave the
+        // original raw composition active internally. Clear it before accepting
+        // another key so the next syllable never appends to the previous input.
+        pinyinDecoder.clear()
         pinyinBuffer = ""
         pinyinRawBuffer = ""
         pinyinCandidates = emptyList()

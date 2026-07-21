@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.2 - 2026-07-21
+
+### English
+
+- Fixed a native Rime composition leak after tapping a Pinyin candidate. The decoder now clears its internal raw composition as part of every native candidate commit, so subsequent input never appends to an earlier Pinyin string.
+- Preserved the 1.4.1 atomic editor-side candidate commit, ensuring the selected text is committed once while both the editor and decoder sessions are reset together.
+
+### 简体中文
+
+- 修复点选拼音候选词后 librime 内部原始拼音组合态残留的问题。现在每次原生候选提交都会同步清空引擎组合态，后续输入不会拼接到此前的拼音字符串。
+- 保留 1.4.1 的编辑器端原子候选提交逻辑，确保候选词只上屏一次，并让编辑器与解码器会话同步重置。
+
 ## 1.4.1 - 2026-07-21
 
 ### English
