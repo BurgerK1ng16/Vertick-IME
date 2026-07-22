@@ -6,6 +6,7 @@ import com.weike.ime.data.PunctuationPreference
 import com.weike.ime.data.TextProviderProtocol
 import com.weike.ime.data.WritingStyle
 import com.weike.ime.text.StructuredExpressionFormatter
+import com.weike.ime.workflow.WorkflowTaskType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -54,6 +55,15 @@ interface TextPolisher {
 
     suspend fun answer(question: String): Result<String>
     fun answerStream(question: String): Flow<String>
+    suspend fun classifyWorkflow(command: String): Result<WorkflowTaskType>
+    suspend fun editWorkflowText(
+        instruction: String,
+        text: String,
+        style: WritingStyle,
+        punctuation: PunctuationPreference,
+        lexicon: List<LexiconTerm>,
+        optimizeExpression: Boolean
+    ): Result<String>
     suspend fun translateToAmericanEnglish(text: String): Result<String>
 }
 
@@ -252,6 +262,71 @@ class MimoTextPolisher(
                 }
             })
             awaitClose { call.cancel() }
+        }
+    }
+
+    override suspend fun classifyWorkflow(command: String): Result<WorkflowTaskType> {
+        val endpoint = endpointProvider()
+        if (!endpoint.isComplete()) {
+            return Result.failure(IllegalStateException("请先配置文本模型接口"))
+        }
+        return try {
+            val request = buildRequest(
+                endpoint = endpoint,
+                systemPrompt = """
+                    你是输入法工作流路由器。根据用户命令只输出一个大写标签：
+                    ANSWER=普通提问或解释；
+                    REWRITE=要求修改、删除、补充、重写当前文本；
+                    POLISH=要求提升专业度、正式度、简洁度、语气或表达质量。
+                    不要输出解释、标点或其他文字。
+                """.trimIndent(),
+                userText = command,
+                temperature = 0.0,
+                stream = false
+            )
+            val response = client.newCall(request).awaitBody { httpResponse ->
+                check(httpResponse.isSuccessful) { MimoApiConfig.responseError(httpResponse, "工作流识别失败") }
+                extractResponseContent(JSONObject(httpResponse.body?.string().orEmpty()), endpoint)
+            }
+            WorkflowTaskType.fromModel(response)
+                ?.let(Result.Companion::success)
+                ?: Result.failure(IllegalStateException("无法识别该命令"))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Result.failure(error)
+        }
+    }
+
+    override suspend fun editWorkflowText(
+        instruction: String,
+        text: String,
+        style: WritingStyle,
+        punctuation: PunctuationPreference,
+        lexicon: List<LexiconTerm>,
+        optimizeExpression: Boolean
+    ): Result<String> {
+        if (text.isBlank()) return Result.failure(IllegalArgumentException("当前没有可处理的文本"))
+        val endpoint = endpointProvider()
+        if (!endpoint.isComplete()) {
+            return Result.failure(IllegalStateException("请先配置文本模型接口"))
+        }
+        return try {
+            val request = buildRequest(
+                endpoint = endpoint,
+                systemPrompt = workflowEditPrompt(style, punctuation, compactLexicon(lexicon), optimizeExpression),
+                userText = "指令：$instruction\n\n待处理文本：\n$text",
+                temperature = 0.1,
+                stream = false
+            )
+            Result.success(client.newCall(request).awaitBody { response ->
+                check(response.isSuccessful) { MimoApiConfig.responseError(response, "文本工作流失败") }
+                extractResponseContent(JSONObject(response.body?.string().orEmpty()), endpoint).trim()
+            }.takeIf { it.isNotBlank() } ?: return Result.failure(IllegalStateException("模型未返回修改后的文本")))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
     }
 
@@ -460,6 +535,43 @@ class MimoTextPolisher(
         不要复述问题，不要自我介绍，不要编造事实；不确定时直接说明不确定。
         除非用户明确要求，否则控制在三段以内，优先使用短句或简短列表。
     """.trimIndent()
+
+    private fun workflowEditPrompt(
+        style: WritingStyle,
+        punctuation: PunctuationPreference,
+        lexicon: List<LexiconTerm>,
+        optimizeExpression: Boolean
+    ): String {
+        val styleRule = when (style) {
+            WritingStyle.OFFICE -> "默认使用正式、清晰的办公表达。"
+            WritingStyle.CHAT -> "默认使用自然、简洁的聊天表达。"
+            WritingStyle.NOTE -> "默认使用结构清晰的笔记表达。"
+            WritingStyle.RAW -> "除用户明确要求外，保持原有表达。"
+        }
+        val punctuationRule = when (punctuation) {
+            PunctuationPreference.SMART -> "使用自然、完整的标点。"
+            PunctuationPreference.SPACES -> "将标点替换为空格，并合并多余空格。"
+            PunctuationPreference.NO_END -> "保留句内标点，但不添加末尾标点。"
+        }
+        val lexiconRule = lexicon.joinToString("、") { term ->
+            if (term.hint.isBlank()) term.term else "${term.term}（${term.hint}）"
+        }.ifBlank { "无" }
+        val structureRule = if (optimizeExpression) {
+            "若原文已有清单、步骤或分点结构，保留并用真实换行整理；不要凭空增加事实。"
+        } else {
+            "不要主动改变原文结构，除非用户指令明确要求。"
+        }
+        return """
+            你是维刻输入法的文本编辑智能体。
+            只处理用户提供的“待处理文本”，严格执行“指令”。
+            $styleRule
+            $punctuationRule
+            $structureRule
+            保留人名、数字、日期、链接、代码、品牌名和专业术语；不得编造事实或添加解释。
+            专业词：$lexiconRule。
+            只输出完整的修改后文本，不要标题、说明、引号、Markdown 代码块或前后缀。
+        """.trimIndent()
+    }
 
     private fun fastPrompt(
         style: WritingStyle,

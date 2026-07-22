@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.3 - 2026-07-22
+
+### English
+
+- Made key feedback more immediate and stable: keys now acknowledge press before release while preserving slide-out cancellation, multi-touch input, and release-to-commit behavior. Pinyin work is batched on a dedicated native dispatcher to reduce fast-typing latency without dropping input.
+- Added the Vertick Know workflow agent. It routes voice commands to answer, exact replacement, rewrite, polish, continue, summarize, expand, translate, proofread, format, extract, and reply tasks. Text-changing operations use a guarded editor snapshot and never alter sensitive fields.
+- Added named text ranges for commands such as “replace the content in parentheses with …”, “replace quoted content with …”, and “replace selected text with …”.
+- Added provider-aware ASR routing for MiMo-compatible, OpenAI Audio Transcriptions-compatible, and DashScope realtime services, with clear unsupported-provider feedback.
+- Added About & Help, an in-app usage guide with real Lucide icons, and GitHub Releases update checks that direct downloads to vertick.cn. The Vertick Know mode now uses the Lucide `wand-sparkles` icon.
+- Tightened candidate, deletion, sound, haptic, and rendering paths to avoid stale UI, delayed feedback, trailing audio, and invalid grapheme deletion.
+
+### 简体中文
+
+- 优化按键跟手性：按下即提供视觉、音效与触感反馈，仍保持松手上屏、滑出取消与多指独立输入。拼音输入改由专用原生队列按帧合并，快打不丢字。
+- 新增“维刻知道”工作流智能体：支持问答、精确替换、修改、润色、续写、总结、扩写、翻译、改错、整理格式、信息提取和生成回复。文本修改使用会话校验，敏感输入框不会被读取或修改。
+- 支持自然语言范围替换，例如“把括号里的内容换成……”“把引号里的内容改成……”和“把选中的内容改成……”。
+- ASR 新增按厂商协议路由，支持 MiMo 兼容、OpenAI Audio Transcriptions 兼容和 DashScope 实时服务，并对暂不支持的配置给出明确提示。
+- “关于”升级为“关于与帮助”，新增带真实 Lucide 图标的使用指引；测试页新增 GitHub Releases 检查更新，发现新版本后引导前往 vertick.cn 下载。维刻知道模式图标改为 `wand-sparkles`。
+- 收紧候选词、删除、按键音、触感与渲染链路，减少过期界面、反馈延迟、音效拖尾和 Emoji 等组合字符误删。
+
 ## 1.4.2 - 2026-07-21
 
 ### English

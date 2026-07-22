@@ -46,6 +46,7 @@ interface KeyboardActions {
     fun closeKeyboard()
     fun switchInputMethod()
     fun dismissAnswer()
+    fun insertAnswer()
     fun pasteClipboard(entry: ClipboardEntry)
     fun pasteRecentClipboard()
     fun deleteClipboard(entry: ClipboardEntry)
@@ -68,13 +69,17 @@ interface KeyboardActions {
 }
 
 /** Custom fixed-layout IME surface based on the supplied phone reference. */
-class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) : View(context) {
+class WeikeKeyboardView(
+    context: Context,
+    private val actions: KeyboardActions,
+    private val keySound: KeyboardSoundPlayer
+) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val targets = mutableListOf<TouchTarget>()
+    private val iconCache = android.util.SparseArray<android.graphics.drawable.Drawable>()
     private val darkLogo = BitmapFactory.decodeResource(resources, R.drawable.vertick_white)
     private val lightLogo = BitmapFactory.decodeResource(resources, R.drawable.vertick_black)
     private val openLessLogo = BitmapFactory.decodeResource(resources, R.drawable.keyboard_logo_openless)
-    private val keySound = KeyboardSoundPlayer(context)
 
     private var mode = KeyboardMode.VOICE
     private var availableModes: List<KeyboardMode> = listOf(KeyboardMode.VOICE, KeyboardMode.TEXT)
@@ -158,17 +163,31 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     // before the second silently discarded its key.
     private val secondaryTouches = mutableMapOf<Int, TouchTarget>()
     private val cancelledSecondaryTouches = mutableSetOf<Int>()
+    private val pressedPointers = mutableMapOf<Int, RectF>()
+    private val feedbackPointers = mutableSetOf<Int>()
     private var longPressTriggered = false
     private var longPressTranslationSelected = false
     private var longPressVoiceBox: RectF? = null
+    private var voiceSendTarget: RectF? = null
     private var holdOverlayProgress = 0f
     private var repeatAction: (() -> Unit)? = null
     private var repeatHaptic: Int? = null
     private var repeatIntervalMs = 92L
+    private var lastKeyboardHapticAtMs = 0L
     private val longPressRunnable = Runnable {
         val target = activeTarget ?: return@Runnable
         val action = target.longPressAction ?: return@Runnable
         if (pressedBox != target.box || candidateDragging || answerDragging || clipboardTracking) return@Runnable
+        // A compact voice surface can place the send key close to the recording
+        // capsule. The send key always owns long press for newline, never polish.
+        if (voiceSendTarget?.contains(touchDownX, touchDownY) == true) {
+            longPressTriggered = true
+            longPressVoiceBox = null
+            actions.newline()
+            emitHaptic(HapticFeedbackConstants.GESTURE_END)
+            invalidate()
+            return@Runnable
+        }
         longPressTriggered = true
         longPressTranslationSelected = false
         longPressVoiceBox = target.box
@@ -528,6 +547,13 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val back = RectF(dp(8), dp(10), dp(46), dp(48))
             lucide(canvas, R.drawable.ic_lucide_chevron_left, back.centerX(), back.centerY(), dp(24), white)
             target(back, hapticFeedback = HapticFeedbackConstants.CONTEXT_CLICK) { actions.dismissAnswer() }
+            // Result insertion replaces the regular header close control, so it
+            // must occupy exactly the same visual and touch position.
+            val insert = RectF(width - dp(46), dp(10), width - dp(8), dp(48))
+            rounded(canvas, insert, dp(19), tabBackground)
+            lucide(canvas, R.drawable.ic_lucide_arrow_big_up, insert.centerX(), insert.centerY(), dp(18), muted)
+            target(insert, hapticFeedback = HapticFeedbackConstants.CONFIRM) { actions.insertAnswer() }
+            return
         } else if (quickPasteRenderText.isNotBlank() && quickPasteProgress > .01f) {
             val tabsRight = if (showCloseButton) width - dp(54) else width - dp(8)
             val tabCellWidth = if (isLandscape()) dp(44) else dp(52)
@@ -542,11 +568,14 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val textBox = RectF(quickPaste.left + dp(40), quickPaste.top, quickPaste.right - dp(8), quickPaste.bottom)
             val content = quickPasteRenderText.replace(Regex("\\s+"), " ").trim()
             paint.textSize = dp(13).toFloat()
+            paint.typeface = Typeface.DEFAULT_BOLD
             val textWidth = paint.measureText(content)
             val elapsed = (SystemClock.elapsedRealtime() - quickPasteMotionStartedAt).coerceAtLeast(0L)
             val progress = (elapsed.coerceAtMost(quickPasteMotionDurationMs).toFloat() / quickPasteMotionDurationMs)
             val easedProgress = .5f - .5f * kotlin.math.cos((Math.PI * progress).toFloat())
-            val textX = textBox.right - (textBox.width() + textWidth) * easedProgress
+            // The preview enters from the right and moves left once. Stop as soon
+            // as its trailing character reaches the right content edge.
+            val textX = textBox.right - textWidth * easedProgress
             canvas.save()
             canvas.clipRect(textBox)
             label(canvas, content, textX, quickPaste.centerY() + dp(5), 13f, white, Paint.Align.LEFT, true)
@@ -600,7 +629,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val selectedColor = if (index == selected) white else muted
             when (option) {
                 KeyboardMode.VOICE -> lucide(canvas, R.drawable.ic_lucide_audio_lines, centerX, tabs.centerY(), dp(20), selectedColor)
-                KeyboardMode.ASK -> lucide(canvas, R.drawable.ic_lucide_message_circle_more, centerX, tabs.centerY(), dp(19), selectedColor)
+                KeyboardMode.ASK -> lucide(canvas, R.drawable.ic_lucide_wand_sparkles, centerX, tabs.centerY(), dp(19), selectedColor)
                 KeyboardMode.TEXT -> label(
                     canvas,
                     if (mode == KeyboardMode.ENGLISH) "EN" else "\u62fc",
@@ -671,23 +700,24 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     }
 
     private fun drawVoice(canvas: Canvas) {
+        voiceSendTarget = null
         val state = voiceState
         val answer = (state as? VoiceUiState.Preview)?.takeIf { mode == KeyboardMode.ASK }
         if (answer != null) {
             drawAnswer(canvas, answer.question, answer.text, answer.streaming)
             return
         }
+        val listening = state == VoiceUiState.Listening
+        val processing = state == VoiceUiState.Processing
         val cx = width / 2f
-        val cy = if (isLandscape()) height * .48f else dp(174)
         val morph = voiceMorph
         val sizeScale = if (isLandscape()) .78f else 1f
         val buttonWidth = dp((188f * sizeScale).toInt()) - dp((56f * sizeScale).toInt()) * morph
         val buttonHeight = dp((64f * sizeScale).toInt()) + dp((68f * sizeScale).toInt()) * morph
+        val cy = if (isLandscape()) height * .48f else dp(174)
         val buttonX = cx + shakeOffset
         val button = RectF(buttonX - buttonWidth / 2, cy - buttonHeight / 2, buttonX + buttonWidth / 2, cy + buttonHeight / 2)
-        val listening = state == VoiceUiState.Listening
-        val processing = state == VoiceUiState.Processing
-        if (longPressTriggered && mode == KeyboardMode.VOICE) {
+        if (longPressTriggered && longPressVoiceBox != null && mode == KeyboardMode.VOICE) {
             drawLongPressTranslationOverlay(canvas)
             return
         }
@@ -698,7 +728,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             val pulse = .8f + .2f * ((kotlin.math.sin((elapsed % 1500L) / 1500f * Math.PI * 2.0) + 1.0) / 2.0).toFloat()
             label(
                 canvas,
-                if (mode == KeyboardMode.ASK) "\u7ef4\u523b\u77e5\u9053" else "\u6da6\u8272\u4e2d",
+                if (mode == KeyboardMode.ASK) "\u7406\u89e3\u4efb\u52a1\u4e2d" else "\u6da6\u8272\u4e2d",
                 buttonX,
                 cy + dp(6),
                 16f,
@@ -719,7 +749,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             if (leavingProcessing) {
                 label(
                     canvas,
-                    if (mode == KeyboardMode.ASK) "\u7ef4\u523b\u77e5\u9053" else "\u6da6\u8272\u4e2d",
+                    if (mode == KeyboardMode.ASK) "\u7406\u89e3\u4efb\u52a1\u4e2d" else "\u6da6\u8272\u4e2d",
                     buttonX,
                     cy + dp(6),
                     16f,
@@ -737,7 +767,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
             else -> "按下开始说话"
         }
         val resolvedPrompt = if (mode == KeyboardMode.ASK && !listening && !processing && state !is VoiceUiState.Error) {
-            "\u6309\u4e0b\u5f00\u59cb\u63d0\u95ee"
+            "\u6309\u4e0b\u53d1\u51fa\u6307\u4ee4"
         } else prompt
         if (resolvedPrompt.isNotEmpty()) label(canvas, resolvedPrompt, buttonX, cy - buttonHeight / 2 - dp(20), 14f, muted, Paint.Align.CENTER, true)
         if (!processing && !leavingProcessing) {
@@ -775,6 +805,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     RectF(rightX - dp(25), lowerY - dp(25), rightX + dp(25), lowerY + dp(25)),
                     longPressAction = { actions.newline() }
                 ) { actions.enter() }
+                voiceSendTarget = RectF(rightX - dp(25), lowerY - dp(25), rightX + dp(25), lowerY + dp(25))
 
                 circle(canvas, leftX, lowerY, dp(24), key)
                 lucide(canvas, R.drawable.ic_lucide_at_sign, leftX, lowerY, dp(21), muted)
@@ -793,6 +824,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 rounded(canvas, newline, dp(24), key)
                 label(canvas, "\u53d1\u9001", newline.centerX(), newline.centerY() + dp(5), 14f, muted, Paint.Align.CENTER)
                 target(newline, longPressAction = { actions.newline() }) { actions.enter() }
+                voiceSendTarget = RectF(newline)
                 circle(canvas, rightX, lowerY, dp(24), key)
                 lucide(canvas, R.drawable.ic_lucide_at_sign, rightX, lowerY, dp(21), muted)
                 target(RectF(rightX - dp(25), lowerY - dp(25), rightX + dp(25), lowerY + dp(25))) {
@@ -1307,7 +1339,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         tint: Int,
         alpha: Float = 1f
     ) {
-        val drawable = AppCompatResources.getDrawable(context, icon)?.mutate() ?: return
+        val drawable = iconCache[icon] ?: AppCompatResources.getDrawable(context, icon)?.mutate()?.also {
+            iconCache.put(icon, it)
+        } ?: return
         drawable.setTint(tint)
         drawable.alpha = (alpha * 255).toInt().coerceIn(0, 255)
         val half = size / 2f
@@ -1554,7 +1588,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val hit = targets.lastOrNull { it.enabled && it.box.contains(event.x, event.y) }
                 activeTarget = hit
                 primaryPointerId = event.getPointerId(0)
-                if (hit != null) secondaryTouches[primaryPointerId] = hit
+                if (hit != null) {
+                    secondaryTouches[primaryPointerId] = hit
+                    pressedPointers[primaryPointerId] = hit.box
+                    dispatchPressFeedback(primaryPointerId, hit)
+                }
                 activeTargetCancelled = false
                 longPressTriggered = false
                 swipeUpTriggered = false
@@ -1573,7 +1611,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val pointerIndex = event.actionIndex
                 val pointerId = event.getPointerId(pointerIndex)
                 val hit = targets.lastOrNull { it.enabled && it.box.contains(event.getX(pointerIndex), event.getY(pointerIndex)) }
-                if (hit != null) secondaryTouches[pointerId] = hit
+                if (hit != null) {
+                    secondaryTouches[pointerId] = hit
+                    pressedPointers[pointerId] = hit.box
+                    dispatchPressFeedback(pointerId, hit)
+                    invalidate()
+                }
                 cancelledSecondaryTouches.remove(pointerId)
                 return true
             }
@@ -1599,6 +1642,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     val pointerIndex = event.findPointerIndex(pointerId)
                     if (pointerIndex < 0 || !target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex))) {
                         cancelledSecondaryTouches += pointerId
+                        pressedPointers.remove(pointerId)
                     }
                 }
                 if (clipboardTracking) {
@@ -1630,7 +1674,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     pressedBox = null
                     invalidate()
                 } else if (longPressTriggered && longPressVoiceBox != null) {
-                    val close = RectF(width - dp(54), dp(4), width - dp(2), dp(56))
+                    val closeRight = if (showCloseButton) width - dp(54) else width - dp(8)
+                    val close = RectF(closeRight - dp(38), dp(10), closeRight, dp(48))
                     if (close.contains(event.x, event.y)) {
                         removeCallbacks(longPressRunnable)
                         repeatAction = null
@@ -1678,6 +1723,7 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                     if (active != null && !active.box.contains(event.x, event.y)) {
                         activeTargetCancelled = true
                         pressedBox = null
+                        pressedPointers.remove(primaryPointerId)
                         removeCallbacks(repeatBackspace)
                         removeCallbacks(longPressRunnable)
                         repeatAction = null
@@ -1692,14 +1738,14 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val cancelled = cancelledSecondaryTouches.remove(pointerId)
                 if (target != null && !cancelled && target.box.contains(event.getX(pointerIndex), event.getY(pointerIndex)) &&
                     (!target.repeat || actions.canBackspace())) {
-                    target.hapticFeedback?.let(::emitHaptic)
-                    if (target.keySound) keySound.play(keyboardSoundVolume)
                     if (pointerId == primaryPointerId && longPressTriggered) {
                         target.releaseAction?.invoke()
                     } else {
                         target.action.invoke()
                     }
                 }
+                pressedPointers.remove(pointerId)
+                feedbackPointers.remove(pointerId)
                 if (pointerId == primaryPointerId) {
                     removeCallbacks(repeatBackspace)
                     removeCallbacks(longPressRunnable)
@@ -1793,12 +1839,10 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 val active = secondaryTouches.remove(pointerId) ?: activeTarget
                 val cancelled = cancelledSecondaryTouches.remove(pointerId) || activeTargetCancelled
                 val releasedOnOriginalTarget = !cancelled && active?.box?.contains(event.x, event.y) == true
-                postDelayed({ pressedBox = null; invalidate() }, 100L)
+                postDelayed({ pressedBox = null; invalidate() }, 32L)
                 if (longPressTriggered) {
                     active?.releaseAction?.invoke()
                 } else if (releasedOnOriginalTarget && (!active!!.repeat || actions.canBackspace())) {
-                    active?.hapticFeedback?.let(::emitHaptic)
-                    if (active?.keySound == true) keySound.play(keyboardSoundVolume)
                     active?.action?.invoke()
                 }
                 activeTarget = null
@@ -1808,6 +1852,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 animateHoldOverlay(show = false)
                 secondaryTouches.clear()
                 cancelledSecondaryTouches.clear()
+                pressedPointers.clear()
+                feedbackPointers.clear()
                 longPressTriggered = false
                 swipeUpTriggered = false
                 performClick()
@@ -1829,6 +1875,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
                 animateHoldOverlay(show = false)
                 secondaryTouches.clear()
                 cancelledSecondaryTouches.clear()
+                pressedPointers.clear()
+                feedbackPointers.clear()
                 longPressTriggered = false
                 swipeUpTriggered = false
                 candidateDragging = false
@@ -1853,10 +1901,6 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         super.onDetachedFromWindow()
     }
 
-    fun releaseResources() {
-        keySound.release()
-    }
-
     override fun computeScroll() {
         if (candidateScroller.computeScrollOffset()) {
             candidateScrollX = candidateScroller.currX.toFloat().coerceIn(0f, candidateMaxScroll)
@@ -1867,11 +1911,11 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     /** Xiaomi routes Android's vibrator service through its system haptic engine. */
     private fun emitHaptic(type: Int) {
         if (hapticStrength == HapticStrength.OFF) return
+        val now = SystemClock.elapsedRealtime()
+        if (type == HapticFeedbackConstants.KEYBOARD_TAP && now - lastKeyboardHapticAtMs < KEYBOARD_HAPTIC_INTERVAL_MS) return
+        if (type == HapticFeedbackConstants.KEYBOARD_TAP) lastKeyboardHapticAtMs = now
         if (hapticStrength == HapticStrength.SYSTEM) {
-            val enabled = runCatching {
-                Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0
-            }.getOrDefault(true)
-            if (enabled) performHapticFeedback(type)
+            performHapticFeedback(type)
             return
         }
         val baseDuration = when (type) {
@@ -1910,6 +1954,12 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
         }
     }
 
+    private fun dispatchPressFeedback(pointerId: Int, target: TouchTarget) {
+        if (!feedbackPointers.add(pointerId)) return
+        target.hapticFeedback?.let(::emitHaptic)
+        if (target.keySound) keySound.play(keyboardSoundVolume)
+    }
+
     private fun dp(value: Int): Float = value * resources.displayMetrics.density
 
     private fun selectModeAt(x: Float, emitFeedback: Boolean) {
@@ -1945,10 +1995,8 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     private fun topModeFor(mode: KeyboardMode, options: List<KeyboardMode>): KeyboardMode =
         if (mode in listOf(KeyboardMode.PINYIN, KeyboardMode.ENGLISH) && KeyboardMode.TEXT in options) KeyboardMode.TEXT else mode
     private fun isActive(state: VoiceUiState) = state == VoiceUiState.Listening
-    private fun isPressed(box: RectF): Boolean = pressedBox?.let { pressed ->
-        kotlin.math.abs(pressed.left - box.left) < 1f && kotlin.math.abs(pressed.top - box.top) < 1f &&
-            kotlin.math.abs(pressed.right - box.right) < 1f && kotlin.math.abs(pressed.bottom - box.bottom) < 1f
-    } == true
+    private fun isPressed(box: RectF): Boolean =
+        sameBox(pressedBox, box) || pressedPointers.values.any { sameBox(it, box) }
     private fun sameBox(first: RectF?, second: RectF?): Boolean = first != null && second != null &&
         kotlin.math.abs(first.left - second.left) < 1f && kotlin.math.abs(first.top - second.top) < 1f &&
         kotlin.math.abs(first.right - second.right) < 1f && kotlin.math.abs(first.bottom - second.bottom) < 1f
@@ -1975,5 +2023,9 @@ class WeikeKeyboardView(context: Context, private val actions: KeyboardActions) 
     )
 
     private data class ClipboardRow(val entry: ClipboardEntry, val box: RectF)
+
+    private companion object {
+        const val KEYBOARD_HAPTIC_INTERVAL_MS = 16L
+    }
 
 }

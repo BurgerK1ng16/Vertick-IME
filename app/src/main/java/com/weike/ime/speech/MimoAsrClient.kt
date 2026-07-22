@@ -189,7 +189,8 @@ class MimoAsrClient(
         .replace(Regex("""(?i)\s*\bnull\b\s*$"""), "")
         .trim()
 
-    private fun wav(pcm: ByteArray): ByteArray {
+    companion object {
+        fun wav(pcm: ByteArray): ByteArray {
         val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         header.put("RIFF".toByteArray())
         header.putInt(36 + pcm.size)
@@ -204,6 +205,7 @@ class MimoAsrClient(
         header.putShort(16)
         header.put("data".toByteArray())
         header.putInt(pcm.size)
-        return header.array() + pcm
+            return header.array() + pcm
+        }
     }
 }

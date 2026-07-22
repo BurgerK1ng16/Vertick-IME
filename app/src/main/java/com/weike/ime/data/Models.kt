@@ -71,6 +71,26 @@ enum class CloudProvider(
 
 enum class TextProviderProtocol { OPENAI_CHAT, ANTHROPIC_MESSAGES, GEMINI_GENERATE_CONTENT }
 
+/**
+ * ASR vendors do not share one interchangeable WebSocket protocol. Keep the
+ * wire format explicit so a text-model endpoint is never sent audio blindly.
+ */
+enum class AsrProtocol {
+    MIMO_MULTIMODAL_HTTP,
+    OPENAI_AUDIO_TRANSCRIPTION,
+    DASHSCOPE_REALTIME_WEBSOCKET,
+    VOLCENGINE_REALTIME_WEBSOCKET,
+    CUSTOM
+}
+
+fun CloudProvider.asrProtocol(): AsrProtocol = when (this) {
+    CloudProvider.XIAOMI_MIMO, CloudProvider.XIAOMI_MIMO_PLAN -> AsrProtocol.MIMO_MULTIMODAL_HTTP
+    CloudProvider.QWEN, CloudProvider.BAILIAN -> AsrProtocol.DASHSCOPE_REALTIME_WEBSOCKET
+    CloudProvider.SILICON_CLOUD -> AsrProtocol.OPENAI_AUDIO_TRANSCRIPTION
+    CloudProvider.VOLCENGINE, CloudProvider.DOUBAO -> AsrProtocol.VOLCENGINE_REALTIME_WEBSOCKET
+    else -> AsrProtocol.CUSTOM
+}
+
 enum class ChineseKeyboardLayout(val displayName: String) {
     FULL("26键全键盘拼音"),
     NINE_KEY("九宫格拼音")

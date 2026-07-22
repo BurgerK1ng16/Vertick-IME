@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.text.Editable
@@ -44,6 +45,7 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.weike.ime.data.AppContainer
+import com.weike.ime.data.AsrProtocol
 import com.weike.ime.data.ChineseKeyboardLayout
 import com.weike.ime.data.CloudProvider
 import com.weike.ime.data.DictionaryPackManager
@@ -62,11 +64,13 @@ import com.weike.ime.data.PunctuationPreference
 import com.weike.ime.data.TypingDictionaryEntry
 import com.weike.ime.data.UsageStats
 import com.weike.ime.data.WritingStyle
+import com.weike.ime.data.asrProtocol
 import com.weike.ime.ime.WeikeInputMethodService
 import com.weike.ime.network.MimoTextPolisher
 import com.weike.ime.network.MimoApiConfig
 import com.weike.ime.network.ModelCatalog
-import com.weike.ime.speech.MimoAsrClient
+import com.weike.ime.network.GitHubReleaseChecker
+import com.weike.ime.speech.RoutedAsrClient
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -74,7 +78,7 @@ import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
     private enum class Page {
-        ACCOUNT, CLOUD, ABOUT,
+        ACCOUNT, CLOUD, ABOUT, USAGE_GUIDE,
         LAYOUT, KEY_EFFECTS, AUXILIARY_INPUT, TOOLBAR, KEYBOARD_MANAGEMENT,
         CLIPBOARD_SETTINGS, LOCAL_DATA, OPTIMIZE_INPUT, PERMISSION_MANAGEMENT, TEST
     }
@@ -535,6 +539,9 @@ class MainActivity : AppCompatActivity() {
     private var dragSource: View? = null
     private val pagePrimary = Color.rgb(0, 55, 85)
     private val managementLogoBlue = Color.rgb(0, 55, 85)
+    private val currentVersionName: String by lazy {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "未知版本"
+    }
     private val settingsBackCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
             showPage(Page.ACCOUNT)
@@ -610,6 +617,7 @@ class MainActivity : AppCompatActivity() {
                 Page.ACCOUNT -> buildAccount()
                 Page.CLOUD -> buildCloudConfiguration()
                 Page.ABOUT -> buildAbout()
+                Page.USAGE_GUIDE -> buildUsageGuide()
                 Page.LAYOUT -> buildLayoutDisplay()
                 Page.KEY_EFFECTS -> buildKeyEffects()
                 Page.AUXILIARY_INPUT -> buildAuxiliaryInput()
@@ -690,7 +698,7 @@ class MainActivity : AppCompatActivity() {
             managementTile("权限管理", "输入法、录音与悬浮窗", R.drawable.ic_lucide_settings_2) { showPage(Page.PERMISSION_MANAGEMENT) }
         ))
         addView(managementTileRow(
-            managementTile("关于", "开源协议与捐助", R.drawable.ic_lucide_circle_help) { showPage(Page.ABOUT) },
+            managementTile("关于与帮助", "使用指引、开源协议与捐助", R.drawable.ic_lucide_circle_help) { showPage(Page.ABOUT) },
             managementTile("测试", "验证输入法与当前配置", R.drawable.ic_lucide_keyboard) { showPage(Page.TEST) }
         ), margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(156), top = 12))
     }
@@ -733,6 +741,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildTestPage(): View = screen {
         addView(subpageHeader("测试") { showPage(Page.ACCOUNT) })
+        addView(updateCheckCard())
         val quickImeSwitcher = BlueToggle(this@MainActivity, false) { enabled ->
             lifecycleScope.launch { container.settings.saveQuickImeSwitcherEnabled(enabled) }
         }
@@ -1093,7 +1102,7 @@ class MainActivity : AppCompatActivity() {
             load = { container.settings.cloudApiSettings.first().asr },
             loadProvider = { container.settings.asrProvider() },
             save = { config, provider -> container.settings.saveAsrApi(config, provider) },
-            test = { config -> MimoAsrClient(endpointProvider = { config }).testConnection() }
+            test = { config -> RoutedAsrClient(endpointProvider = { config }).testConnection() }
         ))
         addView(section("文本模型"))
         addView(providerConfigurationCard(
@@ -1106,7 +1115,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildAbout(): View = screen {
-        addView(subpageHeader("关于我们") { showPage(Page.ACCOUNT) })
+        addView(subpageHeader("关于与帮助") { showPage(Page.ACCOUNT) })
         addView(card().apply {
             addView(TextView(this@MainActivity).apply {
                 text = "维刻输入法"
@@ -1119,6 +1128,14 @@ class MainActivity : AppCompatActivity() {
                 textSize = 16f
                 setTextColor(getColor(R.color.weike_muted))
                 layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 6)
+            })
+        })
+        addView(section("帮助"))
+        addView(card().apply {
+            addView(actionRow("使用指引", "语音、键盘与维刻知道的操作说明") { showPage(Page.USAGE_GUIDE) })
+            addDivider(this)
+            addView(actionRow("反馈问题与建议", "在 GitHub Issues 中提交") {
+                openExternalUrl("https://github.com/BurgerK1ng16/Vertick-IME/issues")
             })
         })
         addView(section("开源协议"))
@@ -1147,6 +1164,64 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     top = 16
                 )
+            })
+        })
+    }
+
+    private fun buildUsageGuide(): View = screen {
+        addView(subpageHeader("使用指引") { showPage(Page.ABOUT) })
+        addView(section("语音与文本"))
+        addView(card().apply {
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_cloud,
+                "配置模型",
+                "进入“语音与文本”，选择厂商并填写密钥与模型。语音建议使用 ASR 模型，文本建议使用小规格文本模型。"
+            ))
+            addDivider(this)
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_mic,
+                "听写与润色",
+                "在语音模式短按录音键开始听写；长按录音键开始润色。长按后向上滑到翻译胶囊可翻译，拖到关闭区域可取消录音。"
+            ))
+        })
+        addView(section("文字键盘"))
+        addView(card().apply {
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_keyboard,
+                "切换中文与英文",
+                "点击右上角模式胶囊中的“拼”或“EN”切换文字键盘；在键盘管理中可选择全键盘拼音或九宫格。"
+            ))
+            addDivider(this)
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_sliders_horizontal,
+                "快速输入标点",
+                "在“定制输入法”开启句号逗号快捷键后，空格左侧的按键点击输入逗号，上滑或长按输入句号。"
+            ))
+            addDivider(this)
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_settings_2,
+                "横屏键盘",
+                "横屏使用悬浮键盘。请先在权限管理中授予悬浮窗权限；返回竖屏或收起键盘后，悬浮键盘会自动关闭。"
+            ))
+        })
+        addView(section("维刻知道"))
+        addView(card().apply {
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_wand_sparkles,
+                "发出指令",
+                "切换到维刻知道后按下录音键说出任务。普通提问会先显示回答，可手动插入；修改、润色、翻译等操作会安全替换当前文本。"
+            ))
+            addDivider(this)
+            addView(usageGuideItem(
+                R.drawable.ic_lucide_wand_sparkles,
+                "可用任务",
+                "支持总结、扩写、续写、翻译、改错、整理格式、提取信息、生成回复、润色，以及“把 A 改成 B”等精确替换。"
+            ))
+        })
+        addView(section("更多帮助"))
+        addView(card().apply {
+            addView(actionRow("GitHub Issues", "提交问题、建议或兼容性反馈") {
+                openExternalUrl("https://github.com/BurgerK1ng16/Vertick-IME/issues")
             })
         })
     }
@@ -1191,6 +1266,13 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(2), 0, dp(2), dp(8))
             visibility = View.GONE
         }
+        val protocolHint = TextView(this@MainActivity).apply {
+            textSize = 13f
+            setTextColor(getColor(R.color.weike_muted))
+            setPadding(dp(2), 0, dp(2), dp(8))
+            visibility = if (isAsr) View.VISIBLE else View.GONE
+        }
+        lateinit var readModelsButton: Button
 
         fun currentConfig() = ModelEndpointConfig(
             url = url.text.toString(),
@@ -1216,10 +1298,32 @@ class MainActivity : AppCompatActivity() {
                 url.setText(if (provider == CloudProvider.CUSTOM) previousCustomUrl else preset.url)
                 if (preset.model.isNotBlank()) model.setText(preset.model)
             }
+            if (isAsr) {
+                protocolHint.text = when (provider.asrProtocol()) {
+                    AsrProtocol.MIMO_MULTIMODAL_HTTP -> "协议：MiMo HTTP 多模态语音识别"
+                    AsrProtocol.OPENAI_AUDIO_TRANSCRIPTION -> "协议：OpenAI Audio Transcriptions（WAV 上传）"
+                    AsrProtocol.DASHSCOPE_REALTIME_WEBSOCKET -> "协议：DashScope 实时 WebSocket 语音识别"
+                    AsrProtocol.VOLCENGINE_REALTIME_WEBSOCKET -> "协议：火山引擎专用实时 WebSocket；需 App ID、Access Token 和 Resource ID"
+                    AsrProtocol.CUSTOM -> "协议：自定义仅兼容 MiMo HTTP 音频聊天格式；其他协议请使用已适配厂商"
+                }
+                readModelsButton.visibility = if (provider.asrProtocol() in setOf(
+                        AsrProtocol.DASHSCOPE_REALTIME_WEBSOCKET,
+                        AsrProtocol.VOLCENGINE_REALTIME_WEBSOCKET
+                    )) View.GONE else View.VISIBLE
+            }
         }
 
         val availableProviders = if (isAsr) {
-            listOf(CloudProvider.XIAOMI_MIMO, CloudProvider.XIAOMI_MIMO_PLAN, CloudProvider.CUSTOM)
+            listOf(
+                CloudProvider.XIAOMI_MIMO,
+                CloudProvider.XIAOMI_MIMO_PLAN,
+                CloudProvider.QWEN,
+                CloudProvider.BAILIAN,
+                CloudProvider.SILICON_CLOUD,
+                CloudProvider.VOLCENGINE,
+                CloudProvider.DOUBAO,
+                CloudProvider.CUSTOM
+            )
         } else {
             CloudProvider.entries.toList()
         }
@@ -1227,7 +1331,6 @@ class MainActivity : AppCompatActivity() {
             applyProvider(provider, replaceWithPreset = true)
         }
 
-        lateinit var readModelsButton: Button
         readModelsButton = formActionButton("读取模型", false) {
             val config = currentConfig()
             val validationError = cloudEndpointKeyValidationError(config)
@@ -1254,7 +1357,7 @@ class MainActivity : AppCompatActivity() {
         lateinit var testButton: Button
         testButton = formActionButton("测试连接", false) {
             val config = currentConfig()
-            val validationError = cloudConfigValidationError(config)
+            val validationError = cloudConfigValidationError(config, isAsr)
             if (validationError != null) {
                 Toast.makeText(this@MainActivity, validationError, Toast.LENGTH_SHORT).show()
                 return@formActionButton
@@ -1274,7 +1377,7 @@ class MainActivity : AppCompatActivity() {
         }
         val saveButton = formActionButton("保存", true) {
             val config = currentConfig()
-            val validationError = cloudConfigValidationError(config)
+            val validationError = cloudConfigValidationError(config, isAsr)
             if (validationError != null) {
                 Toast.makeText(this@MainActivity, validationError, Toast.LENGTH_SHORT).show()
                 return@formActionButton
@@ -1286,6 +1389,7 @@ class MainActivity : AppCompatActivity() {
         }
         addView(picker, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(52), bottom = 12))
         addView(officialEndpoint)
+        addView(protocolHint)
         addView(url)
         addView(apiKey)
         addView(model)
@@ -1309,11 +1413,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun cloudProviderPreset(provider: CloudProvider, isAsr: Boolean): ModelEndpointConfig = ModelEndpointConfig(
         url = provider.endpointPreset,
-        model = if (isAsr && provider in setOf(CloudProvider.XIAOMI_MIMO, CloudProvider.XIAOMI_MIMO_PLAN)) {
-            "MiMo-V2.5-ASR"
-        } else {
-            provider.defaultTextModel
-        },
+        model = if (isAsr) when (provider) {
+            CloudProvider.XIAOMI_MIMO, CloudProvider.XIAOMI_MIMO_PLAN -> "MiMo-V2.5-ASR"
+            CloudProvider.QWEN, CloudProvider.BAILIAN -> "qwen3-asr-flash-realtime"
+            CloudProvider.SILICON_CLOUD -> "FunAudioLLM/SenseVoiceSmall"
+            CloudProvider.VOLCENGINE, CloudProvider.DOUBAO -> "volc.bigasr.auc"
+            else -> provider.defaultTextModel
+        } else provider.defaultTextModel,
         provider = provider
     )
 
@@ -1324,11 +1430,20 @@ class MainActivity : AppCompatActivity() {
         else -> CloudProvider.CUSTOM
     }
 
-    private fun cloudConfigValidationError(config: ModelEndpointConfig): String? = runCatching {
+    private fun cloudConfigValidationError(config: ModelEndpointConfig, isAsr: Boolean = false): String? = runCatching {
         require(config.isComplete()) { "请完整填写接口信息" }
         require(config.apiKey.length <= 512 && config.apiKey.none(Char::isWhitespace)) { "接口密钥格式无效" }
         require(config.model.length <= 128 && config.model.none(Char::isWhitespace)) { "模型名称格式无效" }
-        MimoApiConfig.chatCompletionsEndpoint(config.url)
+        if (!isAsr) {
+            MimoApiConfig.chatCompletionsEndpoint(config.url)
+        } else when (config.provider.asrProtocol()) {
+            AsrProtocol.MIMO_MULTIMODAL_HTTP, AsrProtocol.CUSTOM -> MimoApiConfig.chatCompletionsEndpoint(config.url)
+            AsrProtocol.OPENAI_AUDIO_TRANSCRIPTION -> MimoApiConfig.audioTranscriptionsEndpoint(config.url)
+            AsrProtocol.DASHSCOPE_REALTIME_WEBSOCKET -> MimoApiConfig.dashScopeRealtimeEndpoint(config.url, config.model)
+            AsrProtocol.VOLCENGINE_REALTIME_WEBSOCKET -> require(
+                config.url.startsWith("https://") || config.url.startsWith("wss://")
+            ) { "火山引擎 ASR 地址必须使用 HTTPS 或 WSS" }
+        }
     }.exceptionOrNull()?.message
 
     private fun cloudEndpointKeyValidationError(config: ModelEndpointConfig): String? = runCatching {
@@ -2059,6 +2174,103 @@ class MainActivity : AppCompatActivity() {
                 }, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, bottom = if (index == steps.lastIndex) 0 else 4))
             }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    }
+
+    private fun usageGuideItem(icon: Int, title: String, detail: String) = LinearLayout(this).apply {
+        gravity = Gravity.TOP
+        setPadding(0, dp(10), 0, dp(10))
+        addView(ImageView(this@MainActivity).apply {
+            setImageResource(icon)
+            setColorFilter(pagePrimary)
+            contentDescription = title
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+        }, LinearLayout.LayoutParams(dp(26), dp(26)).apply { marginEnd = dp(13) })
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(getColor(R.color.weike_text))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = detail
+                textSize = 14f
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setTextColor(getColor(R.color.weike_muted))
+                layoutParams = margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 4)
+            })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    }
+
+    private fun updateCheckCard() = illustratedOptionCard(
+        "检查更新",
+        operationGuide("查询 GitHub Releases 中的最新正式版本", "发现更新后将引导你前往 vertick.cn 下载")
+    ) {
+        val status = TextView(this@MainActivity).apply {
+            textSize = 14f
+            setTextColor(getColor(R.color.weike_muted))
+            visibility = View.GONE
+        }
+        lateinit var button: Button
+        button = formActionButton("检查更新", false) {
+            button.isEnabled = false
+            button.text = "正在检查"
+            status.visibility = View.VISIBLE
+            status.text = "正在查询 GitHub Releases…"
+            lifecycleScope.launch {
+                GitHubReleaseChecker().latestRelease()
+                    .onSuccess { release ->
+                        val hasUpdate = GitHubReleaseChecker.isNewer(release.tag, currentVersionName)
+                        val published = release.publishedAt.take(10)
+                        status.text = if (hasUpdate) {
+                            "发现新版本 ${release.tag}"
+                        } else {
+                            "当前已是最新版本（$currentVersionName）"
+                        }
+                        showUpdateResult(release, hasUpdate, published)
+                    }
+                    .onFailure { error ->
+                        status.text = "检查失败：${error.message ?: "请检查网络后重试"}"
+                    }
+                button.isEnabled = true
+                button.text = "检查更新"
+            }
+        }
+        addView(button, margins(ViewGroup.LayoutParams.MATCH_PARENT, dp(46), top = 6))
+        addView(status, margins(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, top = 9))
+    }
+
+    private fun showUpdateResult(
+        release: GitHubReleaseChecker.Release,
+        hasUpdate: Boolean,
+        published: String
+    ) {
+        val title = if (hasUpdate) "发现新版本" else "已是最新版本"
+        val releaseName = release.name.ifBlank { release.tag }
+        val message = buildString {
+            append("当前版本：")
+            append(currentVersionName)
+            append("\n最新版本：")
+            append(releaseName)
+            if (published.isNotBlank()) append("\n发布日期：").append(published)
+            if (release.notes.isNotBlank()) append("\n\n更新说明：\n").append(release.notes.take(1_200))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setNegativeButton("关闭", null)
+            .apply {
+                if (hasUpdate) {
+                    setPositiveButton("前往官网下载") { _, _ -> openExternalUrl(GitHubReleaseChecker.DOWNLOAD_SITE_URL) }
+                }
+            }
+            .show()
+    }
+
+    private fun openExternalUrl(url: String) {
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            .onFailure { Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show() }
     }
 
     private fun actionRow(title: String, detail: String, destructive: Boolean = false, action: () -> Unit) = LinearLayout(this).apply {

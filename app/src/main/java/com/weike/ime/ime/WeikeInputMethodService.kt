@@ -6,14 +6,18 @@ import android.content.Context
 import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.drawable.GradientDrawable
+import android.icu.text.BreakIterator
 import android.text.InputType
+import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Choreographer
 import android.provider.Settings
 import android.util.Log
 import android.view.MotionEvent
@@ -47,9 +51,12 @@ import com.weike.ime.network.MimoTextPolisher
 import com.weike.ime.network.TextPolisher
 import com.weike.ime.speech.AudioRecorder
 import com.weike.ime.speech.BoundedPcmBuffer
-import com.weike.ime.speech.MimoAsrClient
+import com.weike.ime.speech.RoutedAsrClient
 import com.weike.ime.text.JiebaSegmenter
 import com.weike.ime.text.StructuredExpressionFormatter
+import com.weike.ime.workflow.WorkflowIntent
+import com.weike.ime.workflow.WorkflowReplaceTarget
+import com.weike.ime.workflow.WorkflowRouter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +72,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.Locale
 
 class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -80,10 +88,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private lateinit var pinyinDecoder: PinyinDecoder
     private lateinit var jieba: JiebaSegmenter
     private lateinit var predictionEngine: PredictionEngine
+    private lateinit var keyboardSound: KeyboardSoundPlayer
     private lateinit var clipboardManager: ClipboardManager
     @Volatile private var cloudApiSettings = CloudApiSettings()
     private val polisher: TextPolisher = MimoTextPolisher(endpointProvider = { cloudApiSettings.text })
-    private val asrClient = MimoAsrClient(endpointProvider = { cloudApiSettings.asr })
+    private val asrClient = RoutedAsrClient(endpointProvider = { cloudApiSettings.asr })
 
     private var mode = KeyboardMode.VOICE
     private var modeBeforeSymbols = KeyboardMode.PINYIN
@@ -124,6 +133,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var engineIdleReleaseJob: Job? = null
     private var rimeTermStageJob: Job? = null
     private var pendingPinyinMutations = 0
+    private val pendingPinyinLetters = StringBuilder()
+    private var pinyinBatchScheduled = false
     private var lastSyncedTerms: List<com.weike.ime.data.LexiconTerm> = emptyList()
     private var lastSyncedTypingDictionary: List<TypingDictionaryEntry> = emptyList()
     private var lastPinyinLearning: List<PinyinLearning> = emptyList()
@@ -157,10 +168,26 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private var lastPackageName: String? = null
     private var voiceStartedAtMs = 0L
     private var activeRecordingDurationMs = 0L
+    private var editorSessionId = 0L
     private var inputViewRecovery: InputViewRecovery? = null
     private var configurationChangeUntilMs = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var renderPending = false
+    private val renderFrameCallback = Choreographer.FrameCallback {
+        renderPending = false
+        if (::keyboard.isInitialized) {
+            keyboard.update(
+                mode, voiceState, style, pinyinBuffer, pinyinCandidates,
+                englishBuffer, englishCandidates, predictionCandidates, rawTranscript, sensitiveField, hapticStrength,
+                pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
+                clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
+                modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols, keyboardCloseButtonEnabled,
+                quickImeSwitcherEnabled, candidateTextSizeLevel, englishAutoCapitalize, shouldAutoCapitalizeEnglish(), keyboardLogo,
+                currentRecentClipboard(), keyboardHeightLevel, keyboardBottomOffsetLevel, punctuationShortcuts,
+                cursorSliderEnabled
+            )
+        }
+    }
     private val clearLearningReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: android.content.Intent) {
             when (intent.action) {
@@ -197,6 +224,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             mode = initialModeFor(visibleKeyboardModes.firstOrNull() ?: KeyboardMode.TEXT)
         }
         recorder = AudioRecorder(this)
+        keyboardSound = KeyboardSoundPlayer(this)
         pinyinDecoder = RimePinyinDecoder(this)
         jieba = JiebaSegmenter(this)
         predictionEngine = PredictionEngine(this, jieba)
@@ -455,7 +483,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun ensureKeyboard() {
-        if (!::keyboard.isInitialized) keyboard = WeikeKeyboardView(this, this)
+        if (!::keyboard.isInitialized) keyboard = WeikeKeyboardView(this, this, keyboardSound)
     }
 
     private fun attachKeyboardTo(host: ViewGroup) {
@@ -698,6 +726,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         lastPackageName = attribute?.packageName
         sensitiveField = isSensitive(attribute)
         if (!configurationRestart) {
+            editorSessionId += 1
             currentInputConnection?.finishComposingText()
             clearTextCompositions()
             clearPredictions(clearContext = true)
@@ -823,7 +852,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         stopVoice(cancelled = true)
         mainHandler.removeCallbacks(landscapeOverlayRunnable)
         dismissLandscapeOverlay()
-        if (::keyboard.isInitialized) keyboard.releaseResources()
+        if (::keyboardSound.isInitialized) keyboardSound.release()
         engineLoadJob?.cancel()
         engineIdleReleaseJob?.cancel()
         rimeTermStageJob?.cancel()
@@ -851,7 +880,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         if (this.mode != mode && (voiceState != VoiceUiState.Idle || activeVoiceMode != null || rawTranscript.isNotBlank())) {
             cancelActiveVoiceSession()
         }
-        if (this.mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotBlank()) {
+        flushPendingPinyinBatch()
+        if (this.mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
             enqueuePinyin {
                 commitCurrentPinyin()
                 applyMode(mode)
@@ -973,6 +1003,25 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         }
     }
 
+    override fun insertAnswer() {
+        val answer = (voiceState as? VoiceUiState.Preview)?.takeIf {
+            mode == KeyboardMode.ASK && !it.streaming && it.text.isNotBlank()
+        } ?: return
+        if (sensitiveField) {
+            toast("敏感输入框不能插入问答内容")
+            return
+        }
+        finishCompositionThen {
+            val connection = currentInputConnection ?: return@finishCompositionThen
+            connection.commitText(answer.text, 1)
+            lastCommittedText = answer.text
+            lastCommitConnection = connection
+            rawTranscript = ""
+            voiceState = VoiceUiState.Idle
+            render()
+        }
+    }
+
     override fun pasteClipboard(entry: ClipboardEntry) {
         finishCompositionThen { currentInputConnection?.commitText(entry.content, 1) }
     }
@@ -1088,7 +1137,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             ensureVoiceSession(sessionId, sessionMode)
             val source = transcription.getOrElse { error ->
                 activeVoiceMode = null
-                voiceState = VoiceUiState.Error("MiMo 语音识别失败：${error.message ?: "网络不可用"}")
+                voiceState = VoiceUiState.Error("语音识别失败：${error.message ?: "网络不可用"}")
                 render()
                 return@launch
             }.trim()
@@ -1149,7 +1198,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             val result = withTimeoutOrNull(processingTimeout) {
                 ensureVoiceSession(sessionId, sessionMode)
                 // Both voice modes always send ASR text, never PCM audio, to the text model.
-                if (askMode) return@withTimeoutOrNull answerQuestion(source, sessionId, sessionMode)
+                if (askMode) return@withTimeoutOrNull processAskWorkflow(source, sessionId, sessionMode)
                 if (!deepPolish) {
                     val fastText = polisher.polishFast(source, style, activePunctuation, terms).getOrElse { error ->
                         Log.w(TAG, "Fast polishing failed; inserting local fallback", error)
@@ -1222,8 +1271,198 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
                     )
                 }
                 is VoiceProcessingResult.Answer -> if (sessionMode == KeyboardMode.ASK) showAnswer(result.question, result.text, sessionId, sessionMode)
+                is VoiceProcessingResult.WorkflowApplied -> if (sessionMode == KeyboardMode.ASK) {
+                    activeVoiceMode = null
+                    rawTranscript = ""
+                    voiceState = VoiceUiState.Idle
+                    toastFor(result.message, 1_800L)
+                    render()
+                }
             }
         }
+    }
+
+    private suspend fun processAskWorkflow(
+        command: String,
+        sessionId: Long,
+        sessionMode: KeyboardMode
+    ): VoiceProcessingResult {
+        val localIntent = WorkflowRouter.route(command)
+        val intent = when (localIntent) {
+            is WorkflowIntent.Ambiguous -> polisher.classifyWorkflow(localIntent.command)
+                .fold(
+                    onSuccess = { WorkflowRouter.fromClassification(localIntent.command, it) },
+                    onFailure = { WorkflowIntent.Answer(localIntent.command) }
+                )
+            else -> localIntent
+        }
+        ensureVoiceSession(sessionId, sessionMode)
+        return when (intent) {
+            is WorkflowIntent.Answer -> answerQuestion(intent.question, sessionId, sessionMode)
+            is WorkflowIntent.ExactReplace -> applyExactWorkflowReplace(intent, sessionId, sessionMode)
+            is WorkflowIntent.TargetedReplace -> applyTargetedWorkflowReplace(intent, sessionId, sessionMode)
+            is WorkflowIntent.Continue -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.CONTINUE, sessionId, sessionMode)
+            is WorkflowIntent.Summarize -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.SUMMARIZE, sessionId, sessionMode)
+            is WorkflowIntent.Expand -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.EXPAND, sessionId, sessionMode)
+            is WorkflowIntent.Translate -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.TRANSLATE, sessionId, sessionMode)
+            is WorkflowIntent.Proofread -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.PROOFREAD, sessionId, sessionMode)
+            is WorkflowIntent.Format -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.FORMAT, sessionId, sessionMode)
+            is WorkflowIntent.Extract -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.EXTRACT, sessionId, sessionMode)
+            is WorkflowIntent.Reply -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.REPLY, sessionId, sessionMode)
+            is WorkflowIntent.Rewrite -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.REWRITE, sessionId, sessionMode)
+            is WorkflowIntent.Polish -> applyModelWorkflowEdit(intent.instruction, WorkflowEditOperation.POLISH, sessionId, sessionMode)
+            is WorkflowIntent.Ambiguous -> VoiceProcessingResult.Error("无法识别该命令")
+        }
+    }
+
+    private suspend fun applyExactWorkflowReplace(
+        intent: WorkflowIntent.ExactReplace,
+        sessionId: Long,
+        sessionMode: KeyboardMode
+    ): VoiceProcessingResult {
+        if (sensitiveField) return VoiceProcessingResult.Error("敏感输入框不支持文本修改")
+        val snapshot = captureEditorSnapshot() ?: return VoiceProcessingResult.Error("当前输入框没有可修改的文本")
+        if (!snapshot.text.contains(intent.source)) {
+            return VoiceProcessingResult.Error("没有找到“${intent.source}”，未修改内容")
+        }
+        ensureVoiceSession(sessionId, sessionMode)
+        val revised = snapshot.text.replace(intent.source, intent.replacement)
+        return if (replaceEditorSnapshot(snapshot, revised)) {
+            VoiceProcessingResult.WorkflowApplied("已${snapshot.scope.label}修改文本")
+        } else {
+            VoiceProcessingResult.Error("文本已变化，请重新执行命令")
+        }
+    }
+
+    private suspend fun applyTargetedWorkflowReplace(
+        intent: WorkflowIntent.TargetedReplace,
+        sessionId: Long,
+        sessionMode: KeyboardMode
+    ): VoiceProcessingResult {
+        if (sensitiveField) return VoiceProcessingResult.Error("敏感输入框不支持文本修改")
+        val snapshot = captureEditorSnapshot() ?: return VoiceProcessingResult.Error("当前输入框没有可修改的文本")
+        val revised = when (intent.target) {
+            WorkflowReplaceTarget.PARENTHESES_CONTENT -> replaceNearestDelimitedContent(
+                snapshot.text,
+                snapshot.beforeCursor.length,
+                intent.replacement,
+                listOf('（' to '）', '(' to ')')
+            )
+            WorkflowReplaceTarget.QUOTED_CONTENT -> replaceNearestDelimitedContent(
+                snapshot.text,
+                snapshot.beforeCursor.length,
+                intent.replacement,
+                listOf('“' to '”', '‘' to '’', '"' to '"', '\'' to '\'')
+            )
+            WorkflowReplaceTarget.SELECTED_TEXT -> {
+                if (snapshot.selectedText.isEmpty()) null
+                else snapshot.text.replaceRange(
+                    snapshot.beforeCursor.length,
+                    snapshot.beforeCursor.length + snapshot.selectedText.length,
+                    intent.replacement
+                )
+            }
+        }
+        if (revised == null) {
+            val targetLabel = when (intent.target) {
+                WorkflowReplaceTarget.PARENTHESES_CONTENT -> "括号里的内容"
+                WorkflowReplaceTarget.QUOTED_CONTENT -> "引号里的内容"
+                WorkflowReplaceTarget.SELECTED_TEXT -> "选中的内容"
+            }
+            return VoiceProcessingResult.Error("没有找到$targetLabel，未修改内容")
+        }
+        ensureVoiceSession(sessionId, sessionMode)
+        return if (replaceEditorSnapshot(snapshot, revised)) {
+            VoiceProcessingResult.WorkflowApplied("已${snapshot.scope.label}替换内容")
+        } else {
+            VoiceProcessingResult.Error("文本已变化，请重新执行命令")
+        }
+    }
+
+    /** Replaces one named range: prefer the range under the cursor, otherwise the nearest one. */
+    private fun replaceNearestDelimitedContent(
+        text: String,
+        cursor: Int,
+        replacement: String,
+        delimiters: List<Pair<Char, Char>>
+    ): String? {
+        data class Range(val start: Int, val end: Int)
+        val ranges = buildList {
+            delimiters.forEach { (opening, closing) ->
+                val stack = ArrayDeque<Int>()
+                text.forEachIndexed { index, character ->
+                    if (opening == closing && character == opening) {
+                        if (stack.isEmpty()) stack.addLast(index)
+                        else add(Range(stack.removeLast() + 1, index))
+                    } else {
+                        when (character) {
+                            opening -> stack.addLast(index)
+                            closing -> if (stack.isNotEmpty()) add(Range(stack.removeLast() + 1, index))
+                        }
+                    }
+                }
+            }
+        }
+        val selected = ranges.minWithOrNull(
+            compareBy<Range> { range ->
+                when {
+                    cursor < range.start -> range.start - cursor
+                    cursor > range.end -> cursor - range.end
+                    else -> 0
+                }
+            }.thenBy { it.end - it.start }
+        ) ?: return null
+        return text.replaceRange(selected.start, selected.end, replacement)
+    }
+
+    private suspend fun applyModelWorkflowEdit(
+        instruction: String,
+        operation: WorkflowEditOperation,
+        sessionId: Long,
+        sessionMode: KeyboardMode
+    ): VoiceProcessingResult {
+        if (sensitiveField) return VoiceProcessingResult.Error("敏感输入框不支持文本修改")
+        val snapshot = captureEditorSnapshot() ?: return VoiceProcessingResult.Error("当前输入框没有可修改的文本")
+        val terms = container.lexicon.all()
+        val revised = polisher.editWorkflowText(
+            instruction = workflowInstruction(operation, instruction),
+            text = snapshot.text,
+            style = style,
+            punctuation = punctuation,
+            lexicon = terms,
+            optimizeExpression = operation in setOf(WorkflowEditOperation.POLISH, WorkflowEditOperation.FORMAT) && expressionOptimization
+        ).getOrElse { error ->
+            return VoiceProcessingResult.Error("${operation.label}失败：${error.message ?: "网络不可用"}")
+        }.trim()
+        ensureVoiceSession(sessionId, sessionMode)
+        if (revised.isBlank()) return VoiceProcessingResult.Error("模型未返回修改后的文本")
+        if (revised == snapshot.text) return VoiceProcessingResult.WorkflowApplied("内容没有变化")
+        return if (replaceEditorSnapshot(snapshot, revised)) {
+            VoiceProcessingResult.WorkflowApplied("已${snapshot.scope.label}${operation.label}")
+        } else {
+            VoiceProcessingResult.Error("文本已变化，请重新执行命令")
+        }
+    }
+
+    private fun workflowInstruction(operation: WorkflowEditOperation, command: String): String = when (operation) {
+        WorkflowEditOperation.CONTINUE ->
+            "在不改动、删减或重复原文的前提下，沿用原文的语言、语气和上下文自然续写；只新增结尾内容，并返回原文加新增续写后的完整文本。"
+        WorkflowEditOperation.SUMMARIZE ->
+            "根据用户命令总结原文，保留核心事实、结论、数字和限制；删除冗余，输出摘要本身。用户补充：$command"
+        WorkflowEditOperation.EXPAND ->
+            "根据用户命令扩写原文，补足必要衔接、说明或细节；不得编造事实、数据或经历。用户补充：$command"
+        WorkflowEditOperation.TRANSLATE ->
+            "将原文按用户指定的目标语言自然翻译；未指定时翻译为自然英语。保留段落、专有名词、数字、链接和代码，只输出译文。用户补充：$command"
+        WorkflowEditOperation.PROOFREAD ->
+            "只修正原文中的错别字、语病、明显标点和空格问题；不得改变原意、文风、结构或补充内容。用户补充：$command"
+        WorkflowEditOperation.FORMAT ->
+            "按用户命令整理原文格式，保留全部信息；需要列表、待办、标题或 Markdown 时使用真实换行，不得凭空增加内容。用户补充：$command"
+        WorkflowEditOperation.EXTRACT ->
+            "从原文中提取用户要求的信息；没有指定类型时提取关键要点。只输出提取结果，不得编造未出现的信息。用户补充：$command"
+        WorkflowEditOperation.REPLY ->
+            "将原文视为待回复的消息或上下文，按用户要求生成一条可直接发送的回复；只输出回复正文，不要复述原文、说明或引号。用户补充：$command"
+        WorkflowEditOperation.REWRITE -> command
+        WorkflowEditOperation.POLISH -> command
     }
 
     private suspend fun answerQuestion(question: String, sessionId: Long, sessionMode: KeyboardMode): VoiceProcessingResult = try {
@@ -1410,6 +1649,123 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             (normalized.contains("和") || normalized.contains("、") || normalized.contains("还有"))
     }
 
+    private fun captureEditorSnapshot(): EditorTextSnapshot? {
+        val connection = currentInputConnection ?: return null
+        val extracted = connection.getExtractedText(ExtractedTextRequest(), 0)
+        val fullText = extracted?.text?.toString()
+        if (!fullText.isNullOrEmpty() && extracted.startOffset == 0 && extracted.partialStartOffset < 0) {
+            val start = extracted.selectionStart.coerceIn(0, fullText.length)
+            val end = extracted.selectionEnd.coerceIn(start, fullText.length)
+            return EditorTextSnapshot(
+                connection = connection,
+                editorSessionId = editorSessionId,
+                text = fullText,
+                beforeCursor = fullText.substring(0, start),
+                selectedText = fullText.substring(start, end),
+                afterCursor = fullText.substring(end),
+                scope = WorkflowTextScope.FULL,
+                fullText = fullText,
+                selectionStart = start,
+                selectionEnd = end
+            )
+        }
+
+        val selected = connection.getSelectedText(0)?.toString().orEmpty()
+        if (selected.isNotEmpty()) {
+            return EditorTextSnapshot(
+                connection = connection,
+                editorSessionId = editorSessionId,
+                text = selected,
+                beforeCursor = "",
+                selectedText = selected,
+                afterCursor = "",
+                scope = WorkflowTextScope.SELECTION
+            )
+        }
+
+        val before = connection.getTextBeforeCursor(MAX_WORKFLOW_CONTEXT_CHARS, 0)?.toString().orEmpty()
+        val after = connection.getTextAfterCursor(MAX_WORKFLOW_CONTEXT_CHARS, 0)?.toString().orEmpty()
+        val paragraphBefore = before.substringAfterLast('\n')
+        val paragraphAfter = after.substringBefore('\n')
+        val paragraph = paragraphBefore + paragraphAfter
+        if (paragraph.isBlank()) return null
+        return EditorTextSnapshot(
+            connection = connection,
+            editorSessionId = editorSessionId,
+            text = paragraph,
+            beforeCursor = paragraphBefore,
+            selectedText = "",
+            afterCursor = paragraphAfter,
+            scope = WorkflowTextScope.PARAGRAPH
+        )
+    }
+
+    /**
+     * The editor may change while the model request is in flight. Validate both the
+     * IME connection and the exact range around the cursor before a destructive edit.
+     */
+    private fun replaceEditorSnapshot(snapshot: EditorTextSnapshot, replacement: String): Boolean {
+        if (snapshot.connection !== currentInputConnection || snapshot.editorSessionId != editorSessionId || sensitiveField) return false
+        val connection = snapshot.connection
+        if (snapshot.fullText != null) {
+            val current = connection.getExtractedText(ExtractedTextRequest(), 0) ?: return false
+            if (current.text?.toString() != snapshot.fullText ||
+                current.selectionStart != snapshot.selectionStart || current.selectionEnd != snapshot.selectionEnd
+            ) return false
+        } else {
+            val currentSelected = connection.getSelectedText(0)?.toString().orEmpty()
+            val currentBefore = connection.getTextBeforeCursor(snapshot.beforeCursor.length, 0)?.toString().orEmpty()
+            val currentAfter = connection.getTextAfterCursor(snapshot.afterCursor.length, 0)?.toString().orEmpty()
+            if (currentSelected != snapshot.selectedText ||
+                currentBefore != snapshot.beforeCursor || currentAfter != snapshot.afterCursor
+            ) return false
+        }
+        val batchStarted = connection.beginBatchEdit()
+        return try {
+            // commitText first removes a live selection. The remaining deletion is
+            // relative to the now-collapsed cursor, avoiding global setSelection.
+            if (snapshot.selectedText.isNotEmpty()) connection.commitText("", 1)
+            if (snapshot.beforeCursor.isNotEmpty() || snapshot.afterCursor.isNotEmpty()) {
+                connection.deleteSurroundingText(snapshot.beforeCursor.length, snapshot.afterCursor.length)
+            }
+            connection.commitText(replacement, 1)
+        } finally {
+            if (batchStarted) connection.endBatchEdit()
+        }
+    }
+
+    private enum class WorkflowTextScope(val label: String) {
+        FULL("全文"),
+        SELECTION("选中文本"),
+        PARAGRAPH("当前段落")
+    }
+
+    private data class EditorTextSnapshot(
+        val connection: InputConnection,
+        val editorSessionId: Long,
+        val text: String,
+        val beforeCursor: String,
+        val selectedText: String,
+        val afterCursor: String,
+        val scope: WorkflowTextScope,
+        val fullText: String? = null,
+        val selectionStart: Int = -1,
+        val selectionEnd: Int = -1
+    )
+
+    private enum class WorkflowEditOperation(val label: String) {
+        CONTINUE("续写"),
+        SUMMARIZE("总结"),
+        EXPAND("扩写"),
+        TRANSLATE("翻译"),
+        PROOFREAD("改错"),
+        FORMAT("整理格式"),
+        EXTRACT("提取"),
+        REPLY("生成回复"),
+        REWRITE("修改"),
+        POLISH("润色")
+    }
+
     /*
      * The service only ever keeps this small result in memory. It avoids a late HTTP
      * completion inserting content after the visual timeout has restored the keyboard.
@@ -1417,6 +1773,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     private sealed interface VoiceProcessingResult {
         data class Success(val text: String, val instant: Boolean = false) : VoiceProcessingResult
         data class Answer(val question: String, val text: String) : VoiceProcessingResult
+        data class WorkflowApplied(val message: String) : VoiceProcessingResult
         data class Error(val message: String) : VoiceProcessingResult
     }
 
@@ -1456,28 +1813,37 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun typePinyin(value: String) {
         engineIdleReleaseJob?.cancel()
-        clearPredictions()
+        if (value.length != 1) return
+        if (pendingPinyinLetters.isEmpty()) clearPredictions()
         pendingPinyinMutations += 1
-        enqueuePinyin {
-            try {
-                applyPinyinState(pinyinDecoder.input(value.lowercase()), allowCommit = false)
-            } finally {
-                pendingPinyinMutations -= 1
-            }
+        pendingPinyinLetters.append(value.lowercase())
+        if (!pinyinBatchScheduled) {
+            pinyinBatchScheduled = true
+            Choreographer.getInstance().postFrameCallback { flushPendingPinyinBatch() }
         }
     }
 
     override fun chooseCandidate(candidate: PinyinCandidate) {
+        flushPendingPinyinBatch()
         val targetConnection = currentInputConnection
         enqueuePinyin {
             if (candidate.directCommit) {
                 commitDirectPinyin(candidate.text, targetConnection)
             } else {
-                val state = pinyinDecoder.selectCandidate(candidate.index)
-                // Some librime schemas do not expose a commit string until the
-                // following key event. The tapped candidate is the authoritative
-                // fallback and must still replace the editor's composing text.
-                commitNativePinyin(state.committedText ?: candidate.text, targetConnection)
+                val current = pinyinDecoder.currentState()
+                val verified = current.candidates.firstOrNull {
+                    !it.directCommit && it.index == candidate.index && it.text == candidate.text
+                } ?: current.candidates.firstOrNull { !it.directCommit && it.text == candidate.text }
+                if (verified == null) {
+                    applyPinyinState(current, allowCommit = false)
+                    return@enqueuePinyin
+                }
+                val state = pinyinDecoder.selectCandidate(verified.index)
+                // Selecting a segment of a long Rime composition does not commit
+                // text yet. It only confirms a segment inside the live preedit.
+                // The engine's commit is authoritative; using the tapped text as
+                // a fallback here duplicates it when the final segment commits.
+                commitNativePinyin(state, state.committedText, targetConnection)
             }
         }
     }
@@ -1512,8 +1878,10 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     override fun pressTextSpace(pinyin: Boolean) {
-        if (pinyin && pinyinCandidates.isNotEmpty()) {
-            chooseCandidate(pinyinCandidates.first())
+        if (pinyin && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
+            enqueueAfterPendingPinyin {
+                commitCurrentPinyin()
+            }
             resetDoubleSpacePeriod()
             return
         }
@@ -1528,6 +1896,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     override fun backspace() {
         resetDoubleSpacePeriod()
         clearPredictions()
+        flushPendingPinyinBatch()
         if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
             pendingPinyinMutations += 1
             enqueuePinyin {
@@ -1543,15 +1912,45 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             updateComposingText(englishBuffer)
             render()
         } else {
-            currentInputConnection?.deleteSurroundingText(1, 0)
+            deletePreviousEditorText()
         }
     }
 
     override fun canBackspace(): Boolean {
         if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotEmpty() || pendingPinyinMutations > 0)) return true
         if (mode == KeyboardMode.ENGLISH && englishBuffer.isNotEmpty()) return true
-        return currentInputConnection?.getTextBeforeCursor(1, 0)?.isNotEmpty() == true
+        val connection = currentInputConnection ?: return false
+        return connection.getSelectedText(0)?.isNotEmpty() == true ||
+            connection.getTextBeforeCursor(2, 0)?.isNotEmpty() == true
     }
+
+    /** Deletes one user-visible character, never a single UTF-16 surrogate unit. */
+    private fun deletePreviousEditorText(): Boolean {
+        val connection = currentInputConnection ?: return false
+        val selected = connection.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            return connection.commitText("", 1) || sendDeleteKey(connection)
+        }
+        val preceding = connection.getTextBeforeCursor(MAX_DELETE_CONTEXT_CHARS, 0)?.toString().orEmpty()
+        if (preceding.isEmpty()) return false
+        val deleteLength = previousGraphemeLength(preceding)
+        return connection.deleteSurroundingText(deleteLength, 0) || sendDeleteKey(connection)
+    }
+
+    private fun previousGraphemeLength(text: String): Int {
+        val iterator = BreakIterator.getCharacterInstance(Locale.getDefault())
+        iterator.setText(text)
+        val start = iterator.preceding(text.length)
+        return if (start == BreakIterator.DONE) {
+            Character.charCount(text.codePointBefore(text.length))
+        } else {
+            (text.length - start).coerceAtLeast(1)
+        }
+    }
+
+    private fun sendDeleteKey(connection: InputConnection): Boolean =
+        connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)) &&
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
 
     override fun moveCursorBy(delta: Int) {
         if (delta == 0) return
@@ -1574,7 +1973,7 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     override fun enter() {
         if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
-            enqueuePinyin { commitRawPinyin() }
+            enqueueAfterPendingPinyin { commitRawPinyin() }
         } else {
             finishCompositionThen { currentInputConnection?.performEditorAction(EditorInfo.IME_ACTION_SEND) }
         }
@@ -1585,8 +1984,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private fun finishCompositionThen(action: () -> Unit) {
-        if (mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotEmpty()) {
-            enqueuePinyin {
+        if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotEmpty() || pendingPinyinMutations > 0)) {
+            enqueueAfterPendingPinyin {
                 commitCurrentPinyin()
                 action()
             }
@@ -1611,28 +2010,22 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
             }
             render()
         }
-        if (mode == KeyboardMode.PINYIN && pinyinRawBuffer.isNotBlank()) enqueuePinyin {
+        if (mode == KeyboardMode.PINYIN && (pinyinRawBuffer.isNotBlank() || pendingPinyinMutations > 0)) {
+            enqueueAfterPendingPinyin {
             commitCurrentPinyin()
             toggle()
+            }
         } else toggle()
     }
 
     private fun render() {
         if (!::keyboard.isInitialized) return
-        if (renderPending) return
-        renderPending = true
-        keyboard.post {
-            renderPending = false
-            keyboard.update(
-                mode, voiceState, style, pinyinBuffer, pinyinCandidates,
-                englishBuffer, englishCandidates, predictionCandidates, rawTranscript, sensitiveField, hapticStrength,
-                pinyinReady, pinyinDecoder.statusText, keyboardTheme, keyboardSoundVolume, visibleKeyboardModes,
-                clipboardEntries, chineseKeyboardLayout == ChineseKeyboardLayout.NINE_KEY,
-                modeBeforeSymbols == KeyboardMode.ENGLISH, nineKeySymbols, keyboardCloseButtonEnabled,
-                quickImeSwitcherEnabled, candidateTextSizeLevel, englishAutoCapitalize, shouldAutoCapitalizeEnglish(), keyboardLogo,
-                currentRecentClipboard(), keyboardHeightLevel, keyboardBottomOffsetLevel, punctuationShortcuts,
-                cursorSliderEnabled
-            )
+        // Rime completion callbacks run on a dedicated worker thread. Choreographer
+        // is thread-local and must only be obtained from the main looper.
+        mainHandler.post {
+            if (!::keyboard.isInitialized || renderPending) return@post
+            renderPending = true
+            Choreographer.getInstance().postFrameCallback(renderFrameCallback)
         }
     }
 
@@ -1769,6 +2162,9 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     private fun applyPinyinState(state: PinyinSessionState, allowCommit: Boolean = true) {
         if (allowCommit) state.committedText?.let(::commitTextAndPredict)
+        // A live composition owns the candidate bar. Invalidate async
+        // predictions before they can overwrite Rime's remaining candidates.
+        if (state.rawComposition.isNotBlank()) clearPredictions()
         pinyinBuffer = displayPinyinComposition(state)
         pinyinRawBuffer = state.rawComposition
         pinyinCandidates = state.candidates
@@ -1781,17 +2177,20 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
      * decoding and deletion, but never expose it as composing text to apps.
      */
     private fun displayPinyinComposition(state: PinyinSessionState): String {
-        if (chineseKeyboardLayout != ChineseKeyboardLayout.NINE_KEY ||
-            !state.rawComposition.all(Char::isDigit)
-        ) return state.preedit
+        if (chineseKeyboardLayout != ChineseKeyboardLayout.NINE_KEY) return state.preedit
+        // The T9 schema may retain separators in context.input while the user
+        // enters successive syllables. Decode against its digit sequence rather
+        // than requiring the raw context to contain digits only.
+        val t9Code = state.rawComposition.filter(Char::isDigit)
+        if (t9Code.isBlank()) return state.preedit
         // The T9 schema receives digits internally. Pick a candidate whose
         // reading maps back to those exact digits before exposing a composing
-        // string. This prevents both the raw code (for example "64") and an
-        // unrelated candidate reading from leaking into the target editor.
+        // string. This prevents raw codes such as "64 426" from leaking into
+        // the target editor while still showing the complete "nihao" reading.
         return state.candidates.asSequence()
             .map { candidate -> pinyinDecoder.pinyinForDisplay(candidate.text).replace(" ", "") }
-            .firstOrNull { reading -> reading.isNotBlank() && t9CodeFor(reading) == state.rawComposition }
-            .orEmpty()
+            .firstOrNull { reading -> reading.isNotBlank() && t9CodeFor(reading) == t9Code }
+            ?: state.preedit.takeUnless { it.any(Char::isDigit) }.orEmpty()
     }
 
     private fun t9CodeFor(pinyin: String): String = buildString(pinyin.length) {
@@ -1813,11 +2212,12 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
     }
 
     private suspend fun commitCurrentPinyin() {
-        val candidate = pinyinCandidates.firstOrNull() ?: return
+        val current = pinyinDecoder.currentState()
+        val candidate = current.candidates.firstOrNull() ?: return
         if (candidate.directCommit) commitDirectPinyin(candidate.text)
         else {
             val state = pinyinDecoder.selectCandidate(candidate.index)
-            commitNativePinyin(state.committedText ?: candidate.text)
+            commitNativePinyin(state, state.committedText)
         }
     }
 
@@ -1851,16 +2251,24 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         render()
     }
 
-    private suspend fun commitNativePinyin(text: String?, targetConnection: InputConnection? = currentInputConnection) {
-        // Selecting a Rime candidate may commit only a segment and leave the
-        // original raw composition active internally. Clear it before accepting
-        // another key so the next syllable never appends to the previous input.
-        pinyinDecoder.clear()
-        pinyinBuffer = ""
-        pinyinRawBuffer = ""
-        pinyinCandidates = emptyList()
-        text?.takeIf { it.isNotBlank() }?.let { commitPinyinCandidateAndPredict(it, targetConnection) }
-        render()
+    private suspend fun commitNativePinyin(
+        state: PinyinSessionState,
+        text: String?,
+        targetConnection: InputConnection? = currentInputConnection
+    ) {
+        if (text.isNullOrBlank()) {
+            // Partial selection: Rime keeps the whole key sequence in
+            // context.input, so rawComposition alone cannot tell us whether text
+            // was committed. Preserve the decoder and render its actual preedit.
+            applyPinyinState(state, allowCommit = false)
+        } else {
+            commitPinyinCandidate(text, targetConnection, schedulePrediction = true)
+            pinyinDecoder.clear()
+            pinyinBuffer = ""
+            pinyinRawBuffer = ""
+            pinyinCandidates = emptyList()
+            render()
+        }
     }
 
     /**
@@ -1868,7 +2276,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
      * reaches the editor. Several editors confirm that transient empty composing
      * state on their next Enter event, which caused a missing or duplicate pick.
      */
-    private fun commitPinyinCandidateAndPredict(text: String, targetConnection: InputConnection?) {
+    private fun commitPinyinCandidate(
+        text: String,
+        targetConnection: InputConnection?,
+        schedulePrediction: Boolean
+    ) {
         if (text.isBlank()) return
         val connection = targetConnection ?: return
         if (connection !== currentInputConnection) return
@@ -1882,8 +2294,11 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         } finally {
             if (batchStarted) connection.endBatchEdit()
         }
-        schedulePredictions(text, connection)
+        if (schedulePrediction) schedulePredictions(text, connection)
     }
+
+    private fun commitPinyinCandidateAndPredict(text: String, targetConnection: InputConnection?) =
+        commitPinyinCandidate(text, targetConnection, schedulePrediction = true)
 
     private fun commitTextAndPredict(text: String, appendSpace: Boolean = false) {
         if (text.isBlank()) return
@@ -1940,6 +2355,26 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
 
     private fun enqueuePinyin(block: suspend () -> Unit) {
         pinyinOperations.trySend(block)
+    }
+
+    private fun flushPendingPinyinBatch() {
+        if (!pinyinBatchScheduled && pendingPinyinLetters.isEmpty()) return
+        pinyinBatchScheduled = false
+        val batch = pendingPinyinLetters.toString()
+        pendingPinyinLetters.clear()
+        if (batch.isBlank()) return
+        enqueuePinyin {
+            try {
+                applyPinyinState(pinyinDecoder.inputBatch(batch), allowCommit = false)
+            } finally {
+                pendingPinyinMutations = (pendingPinyinMutations - batch.length).coerceAtLeast(0)
+            }
+        }
+    }
+
+    private fun enqueueAfterPendingPinyin(action: suspend () -> Unit) {
+        flushPendingPinyinBatch()
+        enqueuePinyin(action)
     }
 
     private fun clearTextCompositions() {
@@ -2134,6 +2569,8 @@ class WeikeInputMethodService : InputMethodService(), KeyboardActions {
         private const val TRANSLATION_TIMEOUT_MS = 8_000L
         private const val DEEP_POLISHING_TIMEOUT_MS = 8_000L
         private const val ANSWER_PROCESSING_TIMEOUT_MS = 18_000L
+        private const val MAX_WORKFLOW_CONTEXT_CHARS = 8_192
+        private const val MAX_DELETE_CONTEXT_CHARS = 64
         private const val PROCESSING_LABEL_FADE_MS = 150L
         private const val TYPEWRITER_CHARACTER_DELAY_MS = 16L
         private const val LANGUAGE_ENGINE_IDLE_TIMEOUT_MS = 5L * 60L * 1000L

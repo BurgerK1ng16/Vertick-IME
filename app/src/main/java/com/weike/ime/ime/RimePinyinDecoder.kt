@@ -9,6 +9,7 @@ import com.weike.ime.data.LexiconTerm
 import com.weike.ime.data.PinyinLearning
 import com.weike.ime.data.TypingDictionaryEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,6 +17,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.Normalizer
 import java.util.zip.ZipInputStream
+import java.util.concurrent.Executors
 
 data class PinyinCandidate(
     val text: String,
@@ -39,6 +41,7 @@ interface PinyinDecoder {
     suspend fun startSession(terms: List<LexiconTerm>, typingDictionary: List<TypingDictionaryEntry>, learning: List<PinyinLearning>): Boolean
     suspend fun clear(): PinyinSessionState
     suspend fun input(value: String): PinyinSessionState
+    suspend fun inputBatch(values: String): PinyinSessionState
     suspend fun backspace(): PinyinSessionState
     suspend fun restoreComposition(value: String): PinyinSessionState
     suspend fun selectCandidate(index: Int): PinyinSessionState
@@ -63,7 +66,12 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
     private val sharedDir = File(appContext.filesDir, "rime/shared")
     private val userDir = File(appContext.filesDir, "rime/user")
     private val sessionMutex = Mutex()
+    private val rimeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "Vertick-Rime").apply { priority = Thread.NORM_PRIORITY + 1 }
+    }
+    private val rimeDispatcher = rimeExecutor.asCoroutineDispatcher()
     private var overlayEntries: List<OverlayEntry> = emptyList()
+    private var overlayEntriesByInitial: Map<Char, List<OverlayEntry>> = emptyMap()
     private var migratedLearning: Map<String, PinyinLearning> = emptyMap()
 
     @Volatile override var isReady = false
@@ -75,7 +83,7 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
         terms: List<LexiconTerm>,
         typingDictionary: List<TypingDictionaryEntry>,
         learning: List<PinyinLearning>
-    ): Boolean = withContext(Dispatchers.Default) {
+    ): Boolean = withContext(rimeDispatcher) {
         sessionMutex.withLock {
             syncOverlay(terms, typingDictionary, learning)
             if (isReady) return@withLock true
@@ -107,6 +115,12 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
     override suspend fun input(value: String): PinyinSessionState = nativeState {
         if (!isReady || value.length != 1) return@nativeState PinyinSessionState()
         Rime.processRimeKey(value[0].code, 0)
+        snapshot()
+    }
+
+    override suspend fun inputBatch(values: String): PinyinSessionState = nativeState {
+        if (!isReady || values.isBlank()) return@nativeState PinyinSessionState()
+        values.forEach { value -> Rime.processRimeKey(value.code, 0) }
         snapshot()
     }
 
@@ -163,7 +177,7 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
     /** librime userdb records native candidate selections. */
     override suspend fun learnCandidate(text: String): Boolean = false
 
-    override suspend fun clearUserLearning(): Boolean = withContext(Dispatchers.Default) {
+    override suspend fun clearUserLearning(): Boolean = withContext(rimeDispatcher) {
         sessionMutex.withLock {
             isReady = false
             statusText = "\u6b63\u5728\u6e05\u9664\u5b66\u4e60\u6570\u636e"
@@ -180,12 +194,13 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
         }
     }
 
-    override suspend fun shutdown() = withContext(Dispatchers.Default) {
+    override suspend fun shutdown() = withContext(rimeDispatcher) {
         sessionMutex.withLock {
             if (isReady) runCatching { Rime.exitRime() }
             isReady = false
             statusText = "\u79bb\u7ebf\u8bcd\u5178\u672a\u52a0\u8f7d"
         }
+        rimeDispatcher.close()
     }
 
     fun pinyinCodeForTerm(term: String, hint: String): String =
@@ -193,7 +208,7 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
 
     override fun pinyinForDisplay(text: String): String = pinyinCodeForTerm(text, "")
 
-    private suspend fun <T> nativeState(block: () -> T): T = withContext(Dispatchers.Default) {
+    private suspend fun <T> nativeState(block: () -> T): T = withContext(rimeDispatcher) {
         sessionMutex.withLock { block() }
     }
 
@@ -231,8 +246,14 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
         val nativeCandidates = Rime.getRimeCandidates(0, MAX_CANDIDATES).mapIndexed { index, candidate ->
             PinyinCandidate(candidate.text, MAX_CANDIDATES - index.toDouble(), index)
         }
+        // `input` is the decoder's complete key sequence. After selecting the
+        // first segment of a long input it intentionally remains unchanged,
+        // while `composition.preedit` reflects the confirmed segment plus the
+        // remaining live segment. Keep both: one for decoder state and one for
+        // what the editor must render.
         val rawComposition = context.input.ifBlank { context.composition.preedit.orEmpty() }
-        val overlay = overlayEntries.asSequence()
+        val preedit = context.composition.preedit.orEmpty().ifBlank { rawComposition }
+        val overlay = overlayEntriesByInitial[rawComposition.firstOrNull()?.lowercaseChar()].orEmpty().asSequence()
             .filter { it.matches(compactPinyin(rawComposition)) }
             .sortedByDescending { it.weight + migratedBoost(it.text) }
             .map { PinyinCandidate(it.text, it.weight.toDouble(), -1, directCommit = true) }
@@ -243,7 +264,7 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
             nativeCandidates
         }
         return PinyinSessionState(
-            preedit = rawComposition,
+            preedit = preedit,
             candidates = (overlay + nativeOrdered).distinctBy { it.text }.take(MAX_CANDIDATES),
             committedText = Rime.getRimeCommit().text?.takeIf(String::isNotBlank)
         )
@@ -326,6 +347,7 @@ class RimePinyinDecoder(context: Context) : PinyinDecoder {
             .filter { it.text.isNotBlank() && it.code.isNotBlank() }
             .distinctBy { it.text }
             .toList()
+        overlayEntriesByInitial = overlayEntries.groupBy { it.code.first() }
     }
 
     private fun migratedBoost(text: String): Int = migratedLearning[text]

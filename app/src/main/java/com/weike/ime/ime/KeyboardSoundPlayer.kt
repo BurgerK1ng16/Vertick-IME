@@ -5,10 +5,10 @@ import android.media.AudioAttributes
 import android.media.SoundPool
 import com.weike.ime.R
 
-/** Low-latency key sound player. The MP3 is loaded once per keyboard view. */
+/** Service-scoped low-latency key sound. New taps replace the prior tail. */
 class KeyboardSoundPlayer(context: Context) {
     private val soundPool = SoundPool.Builder()
-        .setMaxStreams(3)
+        .setMaxStreams(1)
         .setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
@@ -19,6 +19,7 @@ class KeyboardSoundPlayer(context: Context) {
     private val soundId = soundPool.load(context, R.raw.vertick_keyboard_sound_typing, 1)
 
     @Volatile private var loaded = false
+    private var activeStreamId = 0
 
     init {
         soundPool.setOnLoadCompleteListener { _, sampleId, status ->
@@ -28,8 +29,13 @@ class KeyboardSoundPlayer(context: Context) {
 
     fun play(volume: Float) {
         val resolved = volume.coerceIn(0f, 1f)
-        if (loaded && resolved > 0f) soundPool.play(soundId, resolved, resolved, 1, 0, 1f)
+        if (!loaded || resolved <= 0f) return
+        if (activeStreamId != 0) soundPool.stop(activeStreamId)
+        activeStreamId = soundPool.play(soundId, resolved, resolved, 1, 0, 1f)
     }
 
-    fun release() = soundPool.release()
+    fun release() {
+        activeStreamId = 0
+        soundPool.release()
+    }
 }

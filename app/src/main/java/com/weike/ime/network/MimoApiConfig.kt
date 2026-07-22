@@ -31,6 +31,39 @@ object MimoApiConfig {
         return validatedUrl(if (path.isEmpty()) "$value/v1beta/models" else "$value/models")
     }
 
+    fun audioTranscriptionsEndpoint(raw: String): String {
+        val value = raw.trim().trimEnd('/')
+        require(value.isNotBlank()) { "API URL is required" }
+        val path = value.toHttpUrlOrNull()?.encodedPath.orEmpty().trim('/')
+        val candidate = when {
+            value.endsWith("/audio/transcriptions", ignoreCase = true) -> value
+            path.isEmpty() -> "$value/v1/audio/transcriptions"
+            else -> "$value/audio/transcriptions"
+        }
+        return validatedUrl(candidate)
+    }
+
+    /** Converts a DashScope HTTPS base endpoint into its realtime WebSocket endpoint. */
+    fun dashScopeRealtimeEndpoint(raw: String, model: String): String {
+        val source = raw.trim().trimEnd('/')
+        require(source.isNotBlank()) { "API URL is required" }
+        val parsed = source.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid API URL")
+        require(parsed.isHttps || parsed.scheme == "wss") { "ASR URL must use HTTPS or WSS" }
+        require(parsed.username.isEmpty() && parsed.password.isEmpty()) { "API URL cannot contain credentials" }
+        val host = parsed.host
+        val selectedModel = model.trim().ifBlank { "qwen3-asr-flash-realtime" }
+        require(selectedModel.length <= 128 && selectedModel.none(Char::isWhitespace)) { "Invalid ASR model" }
+        val base = when {
+            source.startsWith("wss://") -> source
+            host.contains("dashscope.aliyuncs.com") -> "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            else -> source.replaceFirst("https://", "wss://")
+        }
+        val endpoint = if (base.contains("/realtime")) base else "$base/v1/realtime"
+        val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid ASR WebSocket URL")
+        require(url.scheme == "wss") { "ASR URL must use WSS" }
+        return url.newBuilder().addQueryParameter("model", selectedModel).build().toString()
+    }
+
     fun anthropicMessagesEndpoint(raw: String): String = endpointFor(raw, "messages")
 
     fun geminiGenerateContentEndpoint(raw: String, model: String, stream: Boolean): String {
